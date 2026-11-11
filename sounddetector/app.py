@@ -15,7 +15,7 @@ from .audio import LiveSource
 from .classifier import load_targets, model_path
 from .config import stream_url
 from .events import Event, Segmenter
-from .features import clip_features, event_windows
+from .features import clip_features, event_windows, suggest_span
 from .store import ClipStore
 from .yamnet import WINDOW, YamNet
 
@@ -56,16 +56,23 @@ class TargetState:
         self.last_score = 0.0
 
 
-def score_clip(models: dict, feats: dict) -> dict:
-    """Max probability per target over the clip's windows."""
+def model_outputs(models: dict, feats: dict, samples: np.ndarray) -> dict:
+    """Each model's clip score, and where in the clip it hears its sound (a suggested mark)."""
     emb = feats["emb"].astype(np.float32)
-    return {t: round(float(m.predict(emb).max()), 3) for t, m in models.items()}
+    scores, spans = {}, {}
+    for t, m in models.items():
+        p = m.predict(emb)
+        scores[t] = round(float(p.max()), 3)
+        span = suggest_span(p, feats["starts"], samples)
+        if span:
+            spans[t] = span
+    return {"scores": scores, "suggested_spans": spans}
 
 
-def describe_clip(yamnet: YamNet, models: dict, feats: dict) -> dict:
+def describe_clip(yamnet: YamNet, models: dict, feats: dict, samples: np.ndarray) -> dict:
     sel = event_windows(feats["levels"])
     return {"hints": yamnet.top_labels(feats["scores"][sel].astype(np.float32)),
-            "scores": score_clip(models, feats)}
+            **model_outputs(models, feats, samples)}
 
 
 class App:
@@ -245,7 +252,7 @@ class App:
             if saved is None:
                 return
             feats = clip_features(self.store, self.yamnet, saved["id"])
-            saved = self.store.update(saved["id"], **describe_clip(self.yamnet, self.models, feats))
+            saved = self.store.update(saved["id"], **describe_clip(self.yamnet, self.models, feats, samples))
             log.info("clip %s (%.1fs, peak %.0f dBFS) %s", saved["id"], saved["duration"], event.peak_dbfs,
                      ", ".join(f"{n} {s}" for n, s in saved["hints"]))
             if self.publisher:

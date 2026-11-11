@@ -365,3 +365,14 @@ def test_marked_span_limits_training_windows(tmp_path):
     with pytest.raises(ValueError):
         store.set_span(clip["id"], "all")
     assert store.set_span(clip["id"], None)["span"] is None
+
+
+def test_model_suggests_where_the_knock_is():
+    from sounddetector.features import suggest_span
+
+    audio = knock(noise(5, level=20), 3.6, amp=8000)
+    starts = np.arange(0, 4.05, 0.1)
+    probs = np.where((starts > 2.7) & (starts < 3.6), 0.9, 0.05)  # windows holding the knock
+    span = suggest_span(probs, starts, audio)
+    assert span[0] <= 3.6 <= span[1] and span[1] - span[0] < 1.0
+    assert suggest_span(np.full(len(starts), 0.2), starts, audio) is None

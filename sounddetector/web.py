@@ -183,7 +183,7 @@ class Server:
                 if label:
                     self.store.set_label(clip["id"], label)
                 feats = clip_features(self.store, yam, clip["id"])
-                saved.append(self.store.update(clip["id"], **describe_clip(yam, models, feats)))
+                saved.append(self.store.update(clip["id"], **describe_clip(yam, models, feats, samples[start:end])))
         return {"saved": len(saved), "clips": saved}
 
     def settings(self) -> dict:
