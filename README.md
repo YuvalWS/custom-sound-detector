@@ -14,6 +14,26 @@ back-to-back ~1 second windows and needs a score of at least 0.5. A short knock 
 depends heavily on where it falls inside the window, and a knock that YAMNet doesn't recognise
 can't be fixed by any setting.
 
+### What we measured
+
+On a 19-second recording from a doorbell camera, with four knocking spells, run through the same
+pipeline as Frigate (0.975 s windows, the same YAMNet model, its 0.5 floor):
+
+| Knocking spell | Best "knock" score, at any window position | Detected by Frigate? |
+|---|---|---|
+| 1st | 0.67 (0.11 where Frigate's windows actually fell) | only if a window happens to start right, about 1 time in 10 |
+| 2nd | 0.02 | never |
+| 3rd | 0.15 | never |
+| 4th | 0.03 | never |
+
+YAMNet heard the later spells as speech, animals or silence. So the window position is a real
+problem, but the bigger one is that the stock model doesn't recognise these knocks at all.
+A classifier trained on three of the spells, on YAMNet's features, recognised the fourth
+(median scores 0.55 to 0.99 for each held-out spell), while the doorbell chime in the same
+recording scored at most 0.11. One recording proves little; that is what the labeling is for.
+
+### The approach
+
 This project keeps YAMNet as a **feature extractor** (the 1,024 numbers it computes for each
 window before picking a label) and trains a tiny logistic-regression classifier on top of
 them, from your own clips. That needs dozens of examples, not thousands, trains in seconds on
@@ -29,8 +49,9 @@ a CPU, and gets better every time you label a missed sound or a false alarm.
 3. **Label.** In the web UI: knock, not a knock, or a category (footsteps, voice, keys, door,
    ...). Categories are optional; they show which sounds the model confuses, and any category
    can become a model of its own later.
-4. **Train.** One click. The report shows cross-validated precision and recall, the score
-   every category gets, and the clips the model got wrong (usually a wrong label).
+4. **Train.** One click. The report shows how many knocks the model finds, how many false
+   alarms a week to expect, the score every category gets, and the clips the model got wrong
+   (usually a wrong label).
 5. **Detect.** While a sound is active, a 0.975 s window is classified every 0.25 s, so a
    short sound is always seen whole. A hit turns an MQTT binary sensor on; it turns off
    after a quiet period. The clip that triggered it is saved, so false alarms can be labeled.
@@ -48,9 +69,16 @@ On the Proxmox host shell, as root:
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/YuvalWS/custom-sound-detector/main/proxmox/sound-detector.sh)"
 ```
 
-It asks for the container settings (ID, storage, network) and the detector settings (stream
-URL, MQTT broker), creates an unprivileged Debian container, installs everything, and prints
-the address and password of the labeling UI.
+It works like the community Proxmox VE helper scripts: a text UI with **Default settings**,
+**Advanced settings** (container ID, hostname, CPU, memory, disk, storage, bridge, IP) and,
+from the second run on, **My saved defaults**. Advanced settings can be saved as your defaults
+(`/usr/local/community-scripts/defaults/sound-detector.vars`, never the passwords). Then it asks
+for the stream (URL, username, password) and MQTT (host, port, username, password), creates an
+unprivileged Debian container, installs everything, and prints the address and the generated
+password of the web UI. Every setting can be changed later in the web UI.
+
+Without a terminal, or with `NONINTERACTIVE=1`, it takes the settings from environment
+variables (listed at the top of the script).
 
 To update later:
 
@@ -64,17 +92,16 @@ pct exec <ctid> -- update
 curl -fsSL https://raw.githubusercontent.com/YuvalWS/custom-sound-detector/main/proxmox/install.sh | sudo bash
 ```
 
-Then set `source.url`, the MQTT settings and `web.password` in
-`/etc/sound-detector/config.yaml`, and run `sudo systemctl restart sound-detector`. Update
-with `sudo update`.
+It prints the web UI's generated password; set the stream and MQTT in its **Settings** tab.
+Update with `sudo update`.
 
 ### What the installer sets up
 
 | Path | What |
 |---|---|
 | `/opt/sound-detector` | the code (a git checkout) and its Python virtualenv |
-| `/etc/sound-detector/config.yaml` | the configuration (readable only by the service) |
-| `/var/lib/sound-detector` | clips, labels, models, reports and the YAMNet model file |
+| `/etc/sound-detector/config.yaml` | the configuration written at install time (readable only by root and the service) |
+| `/var/lib/sound-detector` | clips, labels, models, reports, the YAMNet model file, and `settings.yaml` (changes made in the web UI) |
 | `sound-detector.service` | the systemd service, running as the `sound-detector` user |
 | `/usr/local/bin/sound-detector` | the command line tool |
 | `/usr/bin/update` | updates to the latest version and restarts |
@@ -94,9 +121,8 @@ go2rtc:
       - ffmpeg:front_door#audio=copy
 ```
 
-If the restream needs a login (go2rtc's `rtsp: username/password`), put it in the URL:
-`rtsp://user:password@<frigate-host>:8554/<stream>`, with characters like `@ : / # ? %` in the
-password percent-encoded. The detector never writes the login to its log.
+If the restream needs a login (go2rtc's `rtsp: username/password`), enter it as the stream
+username and password, not in the URL: it is percent-encoded for you, so any characters work.
 
 Then check the levels, to see that audio arrives and to choose `collection.min_dbfs`:
 
@@ -138,8 +164,16 @@ A good first dataset:
   `not_knock` and every category. `unsure` and unlabeled clips are left out.
 - Evaluation is 5-fold cross-validation by clip: the numbers come from clips the model did
   not see. A clip's score is its best window, the same as the live detector sees it.
-- The threshold is the one with the best F1 on those scores; override it per target with
-  `detection.thresholds`.
+- **The threshold is set by false alarms, not by precision.** Precision on your labels depends
+  on how many knocks you recorded on purpose, so it says little about real life. Instead,
+  the share of labeled everyday sounds that would alarm, times how many sounds a day the
+  detector hears (it counts them), gives false alarms per week. The threshold is the lowest
+  one (so the most knocks found) that stays within `training.false_alarms_per_week`, 1 by
+  default. With few labeled everyday sounds the estimate is coarse; the report says how many
+  are needed to check the budget at all. Until a full day has been counted, no labeled
+  everyday sound may alarm. The threshold never goes below 0.5, where the model itself starts
+  saying "yes": the budget can only raise it, so kinds of sound nobody labeled don't slip
+  through a low threshold. Override it per target with `detection.thresholds`.
 - At least 5 target clips and 10 others are needed.
 
 The running service picks up a new model within seconds. The previous one is kept in
@@ -189,9 +223,22 @@ The installed wrapper reads `/etc/sound-detector/config.yaml`; pass `-c` for ano
 
 ## Configuration
 
+The **Settings** tab of the web UI changes the common settings: the stream and its login,
+MQTT, collection, detection, the false-alarm budget and the UI's own password. Saving
+restarts the service. The changes go to `settings.yaml` in the data directory and override
+the config file key by key (the service can't write to `/etc`).
+
 All options, with defaults and explanations, are in
-[`sounddetector/config.py`](sounddetector/config.py). The common ones are in
+[`sounddetector/config.py`](sounddetector/config.py); the common ones are in
 [`config.example.yaml`](config.example.yaml).
+
+### Passwords
+
+The stream, MQTT and web UI passwords are stored in plain text in the config file and in
+`settings.yaml`, readable only by root and the service user, the same way Frigate keeps its
+camera passwords in its `.env`. They are never sent to the browser (the Settings tab only
+shows whether one is set), never written to the log (a login in an ffmpeg error is masked),
+and never part of the repository. The Proxmox helper's saved defaults leave them out.
 
 ## Privacy and backups
 

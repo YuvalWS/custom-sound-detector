@@ -101,9 +101,9 @@ class ClipStore:
             dt = datetime.fromtimestamp(recorded).astimezone()
             source = re.sub(r"[^A-Za-z0-9_-]", "_", meta.get("source", "clip"))[:40]
             clip_id = f"{source}-{dt:%Y%m%d-%H%M%S}-{int(recorded * 1000) % 1000:03d}"
-            n = 1
-            while clip_id in self._index:
-                clip_id = f"{clip_id.rsplit('~', 1)[0]}~{n}"
+            base, n = clip_id, 1
+            while clip_id in self._index:  # same millisecond (imports, tests)
+                clip_id = f"{base}-{n}"
                 n += 1
             day = f"{dt:%Y-%m-%d}"
             full = {
@@ -208,6 +208,37 @@ class ClipStore:
                 if day.is_dir() and not any(day.iterdir()):
                     shutil.rmtree(day, ignore_errors=True)
             return removed
+
+    # ---- how many sounds a day the detector hears (scales false alarms to a rate) -------
+    @property
+    def _events_file(self) -> Path:
+        return self.root / "events_per_day.json"
+
+    def count_event(self, when: float | None = None) -> None:
+        day = datetime.fromtimestamp(when or time.time()).astimezone().strftime("%Y-%m-%d")
+        with self._lock:
+            counts = self.event_counts()
+            counts[day] = counts.get(day, 0) + 1
+            for old in sorted(counts)[:-60]:  # keep two months
+                del counts[old]
+            tmp = self._events_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(counts))
+            tmp.replace(self._events_file)
+
+    def event_counts(self) -> dict[str, int]:
+        try:
+            return json.loads(self._events_file.read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def events_per_day(self) -> float | None:
+        """Median sound events per full day over the last two weeks (today excluded)."""
+        today = datetime.now().astimezone().strftime("%Y-%m-%d")
+        counts = self.event_counts()
+        days = [n for d, n in sorted(counts.items()) if d != today][-14:]
+        if not days and today in counts:
+            return None  # first day: not a full day yet
+        return float(np.median(days)) if days else None
 
     def stats(self) -> dict:
         with self._lock:

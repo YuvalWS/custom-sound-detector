@@ -45,22 +45,53 @@ def _predict(params, X):
     return 1.0 / (1.0 + np.exp(-np.clip(z, -50, 50)))
 
 
-def _choose_threshold(scores, truth) -> float:
-    """Best F1 on the cross-validated clip scores; ties go to the higher threshold."""
-    best, best_t = -1.0, 0.5
-    for t in np.arange(0.20, 0.951, 0.05):
-        pred = scores >= t
-        tp = np.sum(pred & truth)
-        fp = np.sum(pred & ~truth)
-        fn = np.sum(~pred & truth)
-        f1 = 2 * tp / max(1, 2 * tp + fp + fn)
-        if f1 >= best:
-            best, best_t = f1, float(round(t, 2))
-    return best_t
+def _events_per_day(store: ClipStore) -> float | None:
+    """Sounds heard per day: counted by the service, else estimated from the saved live clips."""
+    counted = store.events_per_day()
+    if counted:
+        return counted
+    today = datetime.now().astimezone().strftime("%Y-%m-%d")
+    per_day: dict[str, int] = {}
+    for m in store.all():
+        if not m.get("imported_from"):
+            per_day[m["day"]] = per_day.get(m["day"], 0) + 1
+    full = [n for d, n in per_day.items() if d != today]
+    return float(np.median(full)) if full else None
+
+
+FLOOR = 0.5  # where the model itself starts to say "yes"; the budget can only raise it
+
+
+def budget_threshold(neg_scores: np.ndarray, events_per_day: float | None, budget_per_week: float) -> dict:
+    """The lowest threshold (so the most knocks found) whose false alarms fit the weekly budget.
+
+    Never below FLOOR: the labeled sounds are not every sound there is, and a low threshold
+    would let kinds of sound nobody labeled alarm.
+
+    The labeled everyday sounds are a sample of what the detector hears: if a share p of them
+    would alarm, that is p * events_per_day * 7 false alarms a week. With few labeled sounds
+    p is coarse, so the result says how many would be needed to check the budget at all.
+    """
+    n = len(neg_scores)
+    allowed = int(np.floor(budget_per_week / 7.0 / events_per_day * n)) if events_per_day and n else 0
+    ranked = np.sort(neg_scores)[::-1]
+    t = FLOOR if allowed >= n else float(np.ceil(ranked[allowed] * 100 + 1e-6) / 100)  # just above it
+    t = round(min(max(t, FLOOR), 0.99), 2)
+    above = int(np.sum(neg_scores >= t))
+    rule = {"budget_per_week": budget_per_week, "events_per_day": events_per_day,
+            "everyday_sounds": n, "allowed_among_them": allowed, "above_threshold": above,
+            "met": above <= allowed}
+    if events_per_day and n:
+        week = events_per_day * 7
+        rule["estimated_per_week"] = round(above / n * week, 2)
+        # One false alarm among the labeled sounds already means this many a week.
+        rule["resolution_per_week"] = round(week / n, 2)
+        rule["sounds_needed"] = int(np.ceil(week / budget_per_week))
+    return {"threshold": t, "rule": rule}
 
 
 def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_pos: int = 5,
-          min_neg: int = 10, progress=None) -> dict:
+          min_neg: int = 10, false_alarms_per_week: float = 1.0, progress=None) -> dict:
     """Train, save <data_dir>/models/<target>.json and return the report (also saved)."""
     from sklearn.model_selection import StratifiedGroupKFold
 
@@ -105,7 +136,14 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
             p = _predict(params, X[te])
             for g in np.unique(groups[te]):
                 oof[g] = p[groups[te] == g].max()
-    threshold = _choose_threshold(oof, truth) if n_splits >= 2 else 0.5
+    # Every labeled non-target clip counts as an everyday sound, imported ones too: an imported
+    # recording that scores high is a false alarm waiting to happen (and errs on the safe side).
+    epd = _events_per_day(store)
+    if n_splits >= 2:
+        choice = budget_threshold(oof[~truth], epd, float(false_alarms_per_week))
+    else:
+        choice = {"threshold": 0.5, "rule": {"note": "too few clips to cross-validate"}}
+    threshold = choice["threshold"]
 
     say("training the final model on all clips")
     mean, scale, coef, b = _fit(X, y, C)
@@ -144,6 +182,7 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
         "windows": int(len(X)),
         "folds": n_splits,
         "threshold": threshold,
+        "threshold_rule": choice["rule"],
         "cv": {"true_positives": tp, "false_positives": fp, "missed": fn,
                "precision": round(tp / max(1, tp + fp), 3), "recall": round(tp / max(1, tp + fn), 3)},
         "categories": categories,
@@ -161,7 +200,7 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
         "intercept": b,
         "yamnet_sha256": yamnet.sha256,
         "C": C,
-        "summary": {k: report[k] for k in ("clips", "positive_clips", "negative_clips", "cv")},
+        "summary": {k: report[k] for k in ("clips", "positive_clips", "negative_clips", "cv", "threshold_rule")},
     }
     model = TargetModel(data)
     path = model_path(data_dir, target)
@@ -174,8 +213,11 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
     report_path = Path(data_dir) / "reports" / f"{target}.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=1))
-    say(f"saved {path} (threshold {threshold}; cross-validated precision {report['cv']['precision']}, "
-        f"recall {report['cv']['recall']})")
+    rule = choice["rule"]
+    fa = f"about {rule['estimated_per_week']} false alarms a week" if "estimated_per_week" in rule else \
+        "false alarm rate unknown until a full day of listening is counted"
+    say(f"saved {path}: threshold {threshold}, finds {round(100 * report['cv']['recall'])}% of "
+        f"{target} clips, {fa}")
     return report
 
 

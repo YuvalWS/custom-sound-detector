@@ -36,7 +36,7 @@ main { max-width: 1100px; margin: 0 auto; padding: 16px; }
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .muted { color: var(--muted); } .small { font-size: 13px; }
-select, input[type=text], input[type=number] { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; }
+select, input[type=text], input[type=number], input[type=password] { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; }
 .btn { border: 1px solid var(--border); background: var(--panel); padding: 8px 14px; border-radius: 9px; cursor: pointer; }
 .btn:hover { background: var(--panel-2); }
 .btn:focus-visible, select:focus-visible, input:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
@@ -81,6 +81,12 @@ pre.log { background: var(--panel-2); border-radius: 8px; padding: 10px; max-hei
 .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
   padding: 8px 14px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 10; }
 .toast.show { opacity: .95; }
+.form { display: grid; grid-template-columns: minmax(150px, 220px) 1fr; gap: 10px 16px; align-items: start; }
+.form label { padding-top: 7px; font-weight: 500; }
+.form input[type=text], .form input[type=number], .form input[type=password] { width: 100%; max-width: 460px; }
+.form .help { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
+.panel h2 { font-size: 15px; margin: 0 0 12px; }
+@media (max-width: 640px) { .form { grid-template-columns: 1fr; gap: 4px; } .form label { padding-top: 10px; } }
 .hidden { display: none !important; }
 a { color: var(--accent); cursor: pointer; }
 @media (max-width: 640px) {
@@ -102,6 +108,7 @@ a { color: var(--accent); cursor: pointer; }
       <button data-tab="browse">Browse</button>
       <button data-tab="train">Train</button>
       <button data-tab="import">Import</button>
+      <button data-tab="settings">Settings</button>
     </nav>
   </div>
 </header>
@@ -208,6 +215,19 @@ a { color: var(--accent); cursor: pointer; }
     <pre class="log hidden" id="t-log"></pre>
   </div>
   <div id="t-report"></div>
+</section>
+
+<section id="tab-settings" class="hidden">
+  <div class="panel hidden" id="s-pending" style="border-color:var(--warn)">Saved settings are waiting for a restart of the service.</div>
+  <div id="s-form"></div>
+  <div class="panel">
+    <div class="row">
+      <button class="btn primary" id="s-save">Save and restart</button>
+      <span class="small muted" id="s-msg"></span>
+    </div>
+    <p class="small muted">Passwords are never shown here or sent to the browser: leave a password field empty to keep it.
+      Changes are stored in <code>settings.yaml</code> in the data directory and override the config file<span id="s-file"></span>.</p>
+  </div>
 </section>
 
 <section id="tab-import" class="hidden">
@@ -532,7 +552,7 @@ async function loadReport() {
   $("t-need").textContent = `${pos} ${pretty(target).toLowerCase()} clips, ${neg} others labeled (needs 5 and 10)`;
   const r = await api(`/api/report?target=${encodeURIComponent(target)}`);
   if (!r) { $("t-report").innerHTML = `<div class="panel muted">No model for "${esc(pretty(target))}" yet.</div>`; return; }
-  const cv = r.cv;
+  const cv = r.cv, rule = r.threshold_rule || {};
   const rows = r.categories.map((c) => `<tr><td>${esc(pretty(c.label))}</td><td class="num">${c.clips}</td><td class="num">${c.mean_score.toFixed(2)}</td>
     <td class="num">${c.max_score.toFixed(2)}</td><td class="num">${c.label === target ? `${c.above_threshold} found` : c.above_threshold ? `<b style="color:var(--bad)">${c.above_threshold} false</b>` : "0"}</td>
     <td><a data-review="${esc(c.label)}">review</a></td></tr>`).join("");
@@ -540,11 +560,16 @@ async function loadReport() {
     <div class="row" style="margin-bottom:12px"><b>Model for "${esc(pretty(target))}"</b><span class="muted small">trained ${esc(fmtTime(r.trained_at))}</span></div>
     <div class="cards">
       <div class="card"><div class="muted small">Clips used</div><div class="v">${r.clips}</div><div class="small muted">${r.positive_clips} ${esc(pretty(target).toLowerCase())}, ${r.negative_clips} other</div></div>
-      <div class="card"><div class="muted small">Threshold</div><div class="v">${r.threshold.toFixed(2)}</div><div class="small muted">best balance found</div></div>
+      <div class="card"><div class="muted small">Threshold</div><div class="v">${r.threshold.toFixed(2)}</div><div class="small muted">${rule.budget_per_week !== undefined ? `lowest within ${rule.budget_per_week} false alarm${rule.budget_per_week === 1 ? "" : "s"}/week` : esc(rule.note || "")}</div></div>
       <div class="card"><div class="muted small">Found (recall)</div><div class="v">${Math.round(cv.recall * 100)}%</div><div class="small muted">${cv.true_positives} found, ${cv.missed} missed</div></div>
-      <div class="card"><div class="muted small">Correct alerts (precision)</div><div class="v">${Math.round(cv.precision * 100)}%</div><div class="small muted">${cv.false_positives} false alarms</div></div>
+      <div class="card"><div class="muted small">False alarms (estimate)</div><div class="v">${rule.estimated_per_week !== undefined ? `≈ ${rule.estimated_per_week}/week` : "?"}</div><div class="small muted">${rule.events_per_day ? `${rule.above_threshold} of ${rule.everyday_sounds} labeled sounds, ~${Math.round(rule.events_per_day)} sounds/day` : "needs a full day of listening"}</div></div>
     </div>
-    <p class="small muted">Measured on clips the model did not see while training (${r.folds}-fold cross-validation). With few clips these numbers swing a lot.</p>
+    <p class="small muted">Measured on clips the model did not see while training (${r.folds}-fold cross-validation). False alarms are the share of
+      labeled everyday sounds that would alarm, times the sounds heard per day: it does not depend on how many knocks you recorded on purpose.</p>
+    ${rule.resolution_per_week !== undefined && rule.resolution_per_week > rule.budget_per_week ? `<p class="small" style="color:var(--warn)">Not enough labeled
+      everyday sounds to check the budget yet: with ${rule.everyday_sounds}, a single false alarm already counts as ${rule.resolution_per_week} a week.
+      About ${rule.sounds_needed} labeled sounds (a week of listening) are needed; "Not a knock" in bulk in Browse is the fast way.</p>` : ""}
+    ${rule.met === false ? `<p class="small" style="color:var(--bad)">Even the highest threshold misses the budget: label the high-scoring sounds below, or check they are labeled right.</p>` : ""}
     </div>
     <div class="panel"><b>What gets confused with "${esc(pretty(target))}"</b>
     <p class="small muted" style="margin-top:4px">Score each label's clips got. A high score on another label means it sounds like the target to the model: label more of it, and check those clips are labeled right.</p>
@@ -590,6 +615,101 @@ drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.ad
 drop.addEventListener("dragleave", () => drop.classList.remove("over"));
 drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); importFiles([...e.dataTransfer.files]); });
 
+// ---- settings tab --------------------------------------------------------------------
+const FIELDS = [
+  ["Stream", [
+    ["source", "url", "Stream URL", "text", "Without the login, e.g. rtsp://frigate-host:8554/front_door_audio. Anything ffmpeg can read."],
+    ["source", "username", "Stream username", "text", "Leave empty if the stream needs no login."],
+    ["source", "password", "Stream password", "secret", "Any characters: it is percent-encoded for you."],
+    ["source", "name", "Microphone name", "text", "Part of the MQTT topics and of the Home Assistant entity id: changing it creates a new entity."],
+  ]],
+  ["MQTT", [
+    ["mqtt", "enabled", "Publish to MQTT", "bool"],
+    ["mqtt", "host", "Broker host", "text"],
+    ["mqtt", "port", "Port", "number"],
+    ["mqtt", "username", "Username", "text"],
+    ["mqtt", "password", "Password", "secret"],
+  ]],
+  ["Collection", [
+    ["collection", "enabled", "Save a clip of every sound", "bool", "Turn off once the model is good; clips that trigger a detection are always saved."],
+    ["collection", "min_dbfs", "Quietest sound (dBFS)", "number", "levelHint"],
+    ["collection", "trigger_db", "Above background by (dB)", "number", "How much louder than the background a sound must be to count."],
+    ["collection", "max_clips_per_hour", "Clips per hour, at most", "number"],
+    ["collection", "max_disk_mb", "Disk for clips (MB)", "number", "When full, the oldest unlabeled clips go first. Labeled clips are never deleted."],
+  ]],
+  ["Detection", [
+    ["detection", "targets", "Labels to detect", "list", "Comma-separated. Each label with a trained model becomes a binary sensor in Home Assistant."],
+    ["detection", "off_delay", "Off after (seconds)", "number", "Seconds without a hit before the sensor turns off."],
+    ["detection", "min_hits", "Hits before on", "number"],
+    ["detection", "thresholds", "Threshold overrides", "map", "Optional, e.g. knock=0.8. Empty: the threshold training chose."],
+  ]],
+  ["Training", [
+    ["training", "false_alarms_per_week", "False alarms per week, at most", "number", "Training picks the threshold that finds the most sounds within this budget."],
+  ]],
+  ["Web UI", [
+    ["web", "password", "New password for this page", "secret", "User admin. The browser asks again after the restart."],
+  ]],
+];
+let SETTINGS = null;
+function fieldHtml([sec, key, label, type, help]) {
+  const id = `f-${sec}-${key}`, v = SETTINGS.settings[sec][key];
+  let input;
+  if (type === "bool") input = `<label class="row small" style="gap:6px;padding-top:7px;font-weight:400"><input type="checkbox" id="${id}" ${v ? "checked" : ""}> on</label>`;
+  else if (type === "secret") input = `<input type="password" id="${id}" autocomplete="new-password" placeholder="${v.set ? "set: leave empty to keep" : "not set"}">` +
+    (v.set && sec !== "web" ? `<label class="small row" style="gap:6px;margin-top:4px;font-weight:400"><input type="checkbox" id="${id}-clear"> remove it</label>` : "");
+  else if (type === "list") input = `<input type="text" id="${id}" value="${esc((v || []).join(", "))}">`;
+  else if (type === "map") input = `<input type="text" id="${id}" value="${esc(Object.entries(v || {}).map(([k, x]) => `${k}=${x}`).join(", "))}">`;
+  else input = `<input type="${type === "number" ? "number" : "text"}" step="any" id="${id}" value="${esc(v ?? "")}">`;
+  let helpText = help === "levelHint" ? levelHint() : help;
+  return `<label for="${id}">${esc(label)}</label><div>${input}${helpText ? `<div class="help" ${help === "levelHint" ? 'id="level-hint"' : ""}>${esc(helpText)}</div>` : ""}</div>`;
+}
+function levelHint() {
+  const s = STATUS?.service || {};
+  return s.connected ? `Right now: ${s.level_dbfs} dBFS, background ${s.background_dbfs} dBFS. Set it a few dB above the background.` : "Shown here once the stream is connected.";
+}
+async function loadSettings() {
+  SETTINGS = await api("/api/settings");
+  $("s-pending").classList.toggle("hidden", !SETTINGS.restart_pending);
+  $("s-file").textContent = SETTINGS.config_file ? ` (${SETTINGS.config_file})` : "";
+  $("s-form").innerHTML = FIELDS.map(([title, fields]) => `<div class="panel"><h2>${esc(title)}</h2><div class="form">${fields.map(fieldHtml).join("")}</div></div>`).join("");
+}
+function collectSettings() {
+  const out = {};
+  for (const [, fields] of FIELDS) for (const [sec, key, , type] of fields) {
+    const el = $(`f-${sec}-${key}`), old = SETTINGS.settings[sec][key];
+    let v;
+    if (type === "bool") v = el.checked;
+    else if (type === "secret") {
+      const clear = $(`f-${sec}-${key}-clear`);
+      if (clear?.checked) v = { clear: true }; else if (el.value) v = el.value; else continue;
+    }
+    else if (type === "list") v = el.value.split(",").map((x) => x.trim()).filter(Boolean);
+    else if (type === "map") { v = {}; for (const part of el.value.split(",").map((x) => x.trim()).filter(Boolean)) { const [k, x] = part.split("="); v[k.trim()] = x === undefined ? "" : x.trim(); } }
+    else if (type === "number") v = el.value === "" ? null : Number(el.value);
+    else v = el.value.trim() || null;
+    if (JSON.stringify(v) !== JSON.stringify(old)) (out[sec] ||= {})[key] = v;
+  }
+  return out;
+}
+$("s-save").onclick = async () => {
+  const changes = collectSettings();
+  if (!Object.keys(changes).length) return toast("Nothing changed");
+  try {
+    await post("/api/settings", changes);
+    $("s-msg").textContent = "Saved. Restarting…"; $("s-save").disabled = true;
+    await new Promise((r) => setTimeout(r, 2500));
+    for (let i = 0; i < 40; i++) {
+      try { await api("/api/status"); break; } catch (e) {
+        if (/unauthorized/i.test(e.message)) { location.reload(); return; } // the page password changed
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    }
+    $("s-msg").textContent = "Saved and restarted."; $("s-save").disabled = false;
+    await refreshStatus(); await loadSettings();
+  } catch (e) { $("s-msg").textContent = e.message; $("s-save").disabled = false; }
+};
+setInterval(() => { const h = $("level-hint"); if (h) h.textContent = levelHint(); }, 5000);
+
 // ---- tabs ---------------------------------------------------------------------------
 function switchTab(name) {
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
@@ -597,6 +717,7 @@ function switchTab(name) {
   if (name !== "label") audio.pause();
   if (name === "browse") loadBrowse();
   if (name === "train") pollJob();
+  if (name === "settings") loadSettings().catch((e) => toast(e.message));
   store.set("tab", name);
 }
 document.querySelectorAll("#tabs button").forEach((b) => b.onclick = () => switchTab(b.dataset.tab));

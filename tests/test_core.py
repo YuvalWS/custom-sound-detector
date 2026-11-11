@@ -161,7 +161,11 @@ def test_training_report_and_model(tmp_path):
     _labeled_dataset(store)
     report = train(store, FakeYamNet(), "knock", tmp_path)
     assert report["clips"] == 20  # unsure left out
-    assert report["cv"]["recall"] >= 0.8
+    # No full day of listening counted yet: no labeled everyday sound may alarm.
+    rule = report["threshold_rule"]
+    assert rule["events_per_day"] is None and rule["allowed_among_them"] == 0
+    top_negative = max(c["score"] for c in report["clip_scores"] if c["label"] != "knock")
+    assert report["threshold"] > top_negative or report["threshold"] == 0.99
     labels = {row["label"] for row in report["categories"]}
     assert labels == {"knock", "doorbell_chime", "not_knock"}
     models = load_targets(tmp_path, ["knock"], FakeYamNet.sha256)
@@ -171,6 +175,18 @@ def test_training_report_and_model(tmp_path):
     # Retraining keeps the previous model.
     train(store, FakeYamNet(), "knock", tmp_path)
     assert len(list((tmp_path / "models" / "history").glob("knock-*.json"))) == 1
+
+
+def test_event_counts_give_events_per_day(tmp_path):
+    import time as _t
+
+    store = ClipStore(tmp_path)
+    assert store.events_per_day() is None
+    for days_ago, n in ((3, 100), (2, 120), (1, 80)):
+        for _ in range(n):
+            store.count_event(_t.time() - days_ago * 86400)
+    store.count_event()  # today does not count until it is over
+    assert store.events_per_day() == 100
 
 
 def test_model_roundtrip(tmp_path):
@@ -221,3 +237,65 @@ def test_redact_hides_stream_login():
 
     msg = "rtsp://restream:s3cr%40t@10.1.2.3:8554/door: Connection refused"
     assert "s3cr" not in redact(msg) and "rtsp://***@10.1.2.3:8554/door" in redact(msg)
+
+
+def test_budget_threshold():
+    from sounddetector.train import budget_threshold
+
+    neg = np.array([0.9, 0.6, 0.3] + [0.05] * 697)  # 700 labeled everyday sounds
+    # 100 sounds a day = 700 a week, so 1 false alarm a week allows 1 of the 700 above.
+    r = budget_threshold(neg, 100, 1.0)
+    assert r["threshold"] == 0.61 and r["rule"]["above_threshold"] == 1 and r["rule"]["met"]
+    assert r["rule"]["estimated_per_week"] == 1.0
+    # Ten times the sounds per day: none may alarm, so just above the highest one.
+    assert budget_threshold(neg, 1000, 1.0)["threshold"] == 0.91
+    # Too few labeled sounds to verify: say how many are needed.
+    small = budget_threshold(np.array([0.2] * 20), 100, 1.0)
+    assert small["rule"]["resolution_per_week"] == 35.0 and small["rule"]["sounds_needed"] == 700
+    assert small["threshold"] == 0.5  # never below the model's own decision point
+    # Unknown rate: nothing labeled may alarm.
+    assert budget_threshold(neg, None, 1.0)["threshold"] == 0.91
+
+
+def test_stream_url_encodes_login():
+    from sounddetector.config import stream_url
+
+    src = {"url": "rtsp://host:8554/door", "username": "restream", "password": "p@ss/w:rd#1"}
+    assert stream_url(src) == "rtsp://restream:p%40ss%2Fw%3Ard%231@host:8554/door"
+    assert stream_url({"url": "rtsp://u:p@host/x", "username": "a"}) == "rtsp://u:p@host/x"
+    assert stream_url({"url": "/tmp/file.mp4", "username": "a"}) == "/tmp/file.mp4"
+    assert stream_url({"url": "rtsp://host/x"}) == "rtsp://host/x"
+
+
+def test_settings_override_and_secrets(tmp_path):
+    import yaml
+
+    conf = tmp_path / "config.yaml"
+    conf.write_text(yaml.safe_dump({"data_dir": str(tmp_path), "mqtt": {"host": "a", "password": "old"}}))
+    cfg = config.load(conf)
+    config.save_settings(cfg, {"mqtt": {"host": "b", "password": "", "port": "1884"},
+                               "detection": {"targets": "knock, footsteps", "thresholds": {"knock": "0.8"}}})
+    cfg2 = config.load(conf)
+    assert cfg2["mqtt"]["host"] == "b" and cfg2["mqtt"]["port"] == 1884
+    assert cfg2["mqtt"]["password"] == "old"  # empty secret keeps the current one
+    assert cfg2["detection"]["targets"] == ["knock", "footsteps"]
+    assert cfg2["detection"]["thresholds"] == {"knock": 0.8}
+    view = config.editable_view(cfg2)
+    assert view["mqtt"]["password"] == {"set": True}  # never the value
+    config.save_settings(cfg2, {"mqtt": {"password": {"clear": True}}})
+    assert config.load(conf)["mqtt"]["password"] is None
+    assert (tmp_path / "settings.yaml").stat().st_mode & 0o077 == 0
+    with pytest.raises(ValueError):
+        config.save_settings(cfg2, {"data_dir": {"x": 1}})
+    with pytest.raises(ValueError):
+        config.save_settings(cfg2, {"detection": {"targets": "../x"}})
+
+
+def test_clips_saved_in_the_same_millisecond_get_usable_ids(tmp_path):
+    store = ClipStore(tmp_path)
+    ids = [store.save(noise(1), {"source": "door", "recorded_at": 1700000000.0}, enforce_rate=False)["id"]
+           for _ in range(3)]
+    assert len(set(ids)) == 3
+    for clip_id in ids:
+        assert store.wav_path(clip_id).exists()
+        store.set_label(clip_id, "knock")

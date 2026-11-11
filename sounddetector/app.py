@@ -13,6 +13,7 @@ import numpy as np
 from . import SAMPLE_RATE, __version__
 from .audio import LiveSource
 from .classifier import load_targets, model_path
+from .config import stream_url
 from .events import Event, Segmenter
 from .features import clip_features, event_windows
 from .store import ClipStore
@@ -95,6 +96,7 @@ class App:
             self.publisher = Publisher(cfg["mqtt"], self.source_name, __version__)
         self._source = None
         self._lock = threading.Lock()
+        self._idle = threading.Event()
         self.reload_models(force=True)
 
     # ---- models ------------------------------------------------------------------------
@@ -130,9 +132,13 @@ class App:
         if self.publisher:
             self.publisher.start()
         src = self.cfg["source"]
-        if not src.get("url"):
-            raise SystemExit("source.url is not set in the config")
-        self._source = LiveSource(src["url"], src["stall_timeout"], src["reconnect_delay"],
+        url = stream_url(src)
+        if not url:
+            # Keep the web UI up, so the stream can be set in Settings (saving restarts us).
+            log.error("source.url is not set: set it in the web UI (Settings) or the config file")
+            self._idle.wait()
+            return
+        self._source = LiveSource(url, src["stall_timeout"], src["reconnect_delay"],
                                   realtime=src.get("realtime", False), loop=src.get("loop", True))
         last_reload = time.time()
         for chunk in self._source:
@@ -147,6 +153,7 @@ class App:
         self._disconnected()
 
     def stop(self) -> None:
+        self._idle.set()
         if self._source:
             self._source.stop()
         if self.publisher:
@@ -213,6 +220,10 @@ class App:
 
     def _event_done(self, event: Event) -> None:
         self.events_seen += 1
+        try:
+            self.store.count_event()
+        except OSError:
+            log.exception("could not count the event")
         # A hit belongs to this clip when its window overlaps the sound itself.
         hits = [h for h in self._hits if h[0] > event.onset and h[0] - WINDOW < event.sound_end]
         save = self.cfg["collection"]["enabled"] or (hits and self.cfg["detection"]["save_clips"])

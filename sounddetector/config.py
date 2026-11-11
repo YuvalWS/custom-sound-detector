@@ -39,8 +39,11 @@ DEFAULTS: dict = {
     "source": {
         # A name for this microphone, used in clip ids and MQTT topics.
         "name": "front_door",
-        # Anything ffmpeg can read: rtsp://, http(s)://, a file path.
+        # Anything ffmpeg can read: rtsp://, http(s)://, a file path. Without a login in it:
+        # put the login in username/password below, which are percent-encoded for you.
         "url": None,
+        "username": None,
+        "password": None,
         # Seconds without audio before ffmpeg is restarted.
         "stall_timeout": 15,
         "reconnect_delay": 5,
@@ -103,6 +106,9 @@ DEFAULTS: dict = {
         "C": 1.0,
         "min_positive_clips": 5,
         "min_negative_clips": 10,
+        # The threshold is set so that the model would have raised at most this many false
+        # alarms per week on the sounds you labeled, scaled to how many sounds a day it hears.
+        "false_alarms_per_week": 1.0,
     },
     "categories": DEFAULT_CATEGORIES,
 }
@@ -118,13 +124,40 @@ def _merge(base: dict, override: dict) -> dict:
     return out
 
 
-def load(path: str | os.PathLike | None) -> dict:
-    data = {}
-    if path:
-        with open(path, encoding="utf-8") as fh:
-            data = yaml.safe_load(fh) or {}
+# Settings changed in the web UI. They live in the data directory (the service can't write
+# /etc) and override the config file, key by key.
+SETTINGS_FILE = "settings.yaml"
+
+# What the web UI may change: section -> keys. Secrets are write-only there.
+EDITABLE = {
+    "source": ["name", "url", "username", "password"],
+    "mqtt": ["enabled", "host", "port", "username", "password"],
+    "collection": ["enabled", "min_dbfs", "trigger_db", "max_clips_per_hour", "max_disk_mb"],
+    "detection": ["targets", "off_delay", "min_hits", "thresholds"],
+    "training": ["false_alarms_per_week"],
+    "web": ["password"],
+}
+SECRETS = {("source", "password"), ("mqtt", "password"), ("web", "password")}
+
+
+def _read_yaml(path) -> dict:
+    with open(path, encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+
+def settings_path(cfg: dict) -> Path:
+    return Path(cfg["data_dir"]) / SETTINGS_FILE
+
+
+def load(path: str | os.PathLike | None, with_settings: bool = True) -> dict:
+    data = _read_yaml(path) if path else {}
     cfg = _merge(DEFAULTS, data)
     cfg["data_dir"] = str(Path(cfg["data_dir"]).expanduser())
+    overrides = settings_path(cfg)
+    if with_settings and overrides.exists():
+        ui = _read_yaml(overrides)
+        cfg = _merge(cfg, {s: {k: v for k, v in (ui.get(s) or {}).items() if k in keys}
+                           for s, keys in EDITABLE.items()})
     if not cfg["yamnet_model"]:
         cfg["yamnet_model"] = str(Path(cfg["data_dir"]) / "yamnet.tflite")
     for target in cfg["detection"]["targets"]:
@@ -135,3 +168,92 @@ def load(path: str | os.PathLike | None) -> dict:
 
 def valid_label(label: str) -> bool:
     return bool(LABEL_RE.match(label or ""))
+
+
+def stream_url(source: dict) -> str | None:
+    """The source URL with username/password inserted, percent-encoded."""
+    from urllib.parse import quote, urlsplit, urlunsplit
+
+    url = source.get("url")
+    if not url or not source.get("username"):
+        return url
+    parts = urlsplit(url)
+    if not parts.scheme or "@" in parts.netloc:
+        return url  # a file path, or a login already in the URL
+    login = quote(str(source["username"]), safe="")
+    if source.get("password"):
+        login += ":" + quote(str(source["password"]), safe="")
+    return urlunsplit(parts._replace(netloc=f"{login}@{parts.netloc}"))
+
+
+def _coerce(default, value):
+    if value is None or value == "":
+        return None if default is None or isinstance(default, str) else default
+    if isinstance(default, bool):
+        if isinstance(value, str):
+            return value.lower() in ("1", "true", "yes", "on")
+        return bool(value)
+    if isinstance(default, int):
+        return int(float(value))
+    if isinstance(default, float):
+        return float(value)
+    if isinstance(default, list):
+        items = value if isinstance(value, list) else str(value).replace(" ", "").split(",")
+        items = [i for i in items if i]
+        for item in items:
+            if not LABEL_RE.match(item):
+                raise ValueError(f"invalid label {item!r}")
+        return items
+    if isinstance(default, dict):
+        if not isinstance(value, dict):
+            raise ValueError("expected a mapping")
+        out = {}
+        for k, v in value.items():
+            if not LABEL_RE.match(k):
+                raise ValueError(f"invalid label {k!r}")
+            if v not in (None, ""):
+                out[k] = float(v)
+        return out
+    return str(value)
+
+
+def editable_view(cfg: dict) -> dict:
+    """The UI-editable settings, with secrets replaced by whether they are set."""
+    view = {}
+    for section, keys in EDITABLE.items():
+        view[section] = {}
+        for key in keys:
+            value = cfg[section].get(key)
+            view[section][key] = {"set": bool(value)} if (section, key) in SECRETS else value
+    return view
+
+
+def save_settings(cfg: dict, changes: dict) -> dict:
+    """Validate UI changes and merge them into the settings file. Returns the new file content.
+
+    A secret left empty keeps its current value; send {"clear": true} to remove it.
+    """
+    path = settings_path(cfg)
+    current = _read_yaml(path) if path.exists() else {}
+    for section, values in (changes or {}).items():
+        if section not in EDITABLE or not isinstance(values, dict):
+            raise ValueError(f"not editable: {section}")
+        for key, value in values.items():
+            if key not in EDITABLE[section]:
+                raise ValueError(f"not editable: {section}.{key}")
+            if (section, key) in SECRETS:
+                if isinstance(value, dict) and value.get("clear"):
+                    current.setdefault(section, {})[key] = None
+                elif value:
+                    current.setdefault(section, {})[key] = str(value)
+                continue
+            current.setdefault(section, {})[key] = _coerce(DEFAULTS[section][key], value)
+    if current.get("source", {}).get("name") is not None and not LABEL_RE.match(current["source"]["name"]):
+        raise ValueError("source.name: lowercase letters, digits and _ only")
+    tmp = path.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("# Written by the web UI (Settings). Overrides the config file key by key.\n")
+        yaml.safe_dump(current, fh, sort_keys=True)
+    tmp.replace(path)
+    return current

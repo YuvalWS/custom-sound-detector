@@ -186,6 +186,30 @@ class Server:
                 saved.append(self.store.update(clip["id"], **describe_clip(yam, models, feats)))
         return {"saved": len(saved), "clips": saved}
 
+    def settings(self) -> dict:
+        from .config import editable_view, load
+
+        # Re-read what is on disk: it may hold saved changes that the next restart will apply.
+        on_disk = load(self.cfg.get("_config_path"))
+        running = {k: v for k, v in self.cfg.items() if k != "_config_path"}
+        return {"settings": editable_view(on_disk), "restart_pending": on_disk != running,
+                "config_file": self.cfg.get("_config_path")}
+
+    def save_settings(self, changes: dict) -> dict:
+        from .config import save_settings
+
+        save_settings(self.cfg, changes)
+        self.request_restart()
+        return {"saved": True, "restarting": True}
+
+    def request_restart(self) -> None:
+        """Exit cleanly once the response is out; systemd (Restart=always) starts us again."""
+        import os
+        import signal
+
+        log.info("settings changed, restarting")
+        threading.Timer(0.7, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
+
     def start_training(self, target: str) -> bool:
         if not valid_label(target):
             raise ValueError("invalid target")
@@ -198,7 +222,8 @@ class Server:
             with self._yamnet_lock:
                 yam = self.yamnet()
                 train(self.store, yam, target, self.cfg["data_dir"], C=float(t["C"]),
-                      min_pos=int(t["min_positive_clips"]), min_neg=int(t["min_negative_clips"]), progress=say)
+                      min_pos=int(t["min_positive_clips"]), min_neg=int(t["min_negative_clips"]),
+                      false_alarms_per_week=float(t["false_alarms_per_week"]), progress=say)
                 det = self.cfg["detection"]
                 targets = sorted(set(det["targets"]) | {target})
                 models = load_targets(self.cfg["data_dir"], targets, yam.sha256, det.get("thresholds"))
@@ -276,6 +301,8 @@ class Server:
                     elif len(parts) == 4 and parts[:2] == ["api", "clips"] and parts[3] == "audio":
                         wav = server.store.wav_path(parts[2])
                         self._send(200, wav.read_bytes(), "audio/wav")
+                    elif parts == ["api", "settings"]:
+                        self._json(server.settings())
                     elif parts == ["api", "report"]:
                         target = q.get("target", KNOCK)
                         if not valid_label(target):
@@ -318,6 +345,8 @@ class Server:
                         self._json({"updated": len(done)})
                     elif parts == ["api", "categories"]:
                         self._json({"categories": server.store.add_category(str(data.get("name", "")).strip())})
+                    elif parts == ["api", "settings"]:
+                        self._json(server.save_settings(data))
                     elif parts == ["api", "train"]:
                         started = server.start_training(data.get("target", KNOCK))
                         self._json({"started": started, "job": server.jobs.state()}, 200 if started else 409)

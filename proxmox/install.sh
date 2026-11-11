@@ -52,8 +52,9 @@ msg "Installing Python packages (this takes a few minutes the first time)"
 install -d -o "$SVC_USER" -g "$SVC_USER" -m 0750 "$DATA_DIR"
 install -d -o root -g "$SVC_USER" -m 0750 "$CONF_DIR"
 if [[ ! -f "$CONF" ]]; then
-  msg "Creating $CONF from the example: set source.url and the passwords in it"
-  install -o root -g "$SVC_USER" -m 0640 "$APP_DIR/config.example.yaml" "$CONF"
+  web_password=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-16)
+  (umask 077; sed "s/^\(  password: \)WEB_PASSWORD$/\1$web_password/" "$APP_DIR/config.example.yaml" >"$CONF")
+  msg "Created $CONF. Web UI: user admin, password $web_password (set the stream and MQTT in its Settings tab)"
 fi
 # Holds passwords: readable by the service, by nobody else.
 chown root:"$SVC_USER" "$CONF"
@@ -109,10 +110,6 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable --quiet sound-detector
-if grep -qE '^\s*url:\s*rtsp://frigate\.local' "$CONF"; then
-  msg "Not starting yet: edit $CONF (source.url, mqtt, web.password), then: systemctl restart sound-detector"
-else
-  systemctl restart sound-detector
-  msg "Running. Logs: journalctl -u sound-detector -f"
-fi
+systemctl restart sound-detector
+msg "Running: web UI on port 8080. Logs: journalctl -u sound-detector -f"
 msg "Done: version $("$APP_DIR/venv/bin/python" -c 'import sounddetector; print(sounddetector.__version__)')"

@@ -1,25 +1,29 @@
-# custom-sound-detector configuration. Every key is optional except source.url;
-# the defaults and their explanations are in sounddetector/config.py.
+# custom-sound-detector configuration. Every key is optional; the defaults and their
+# explanations are in sounddetector/config.py. The common settings can also be changed in
+# the web UI (Settings tab), which stores them in <data_dir>/settings.yaml, overriding this file.
 
 source:
-  # A name for this microphone: used in clip names and MQTT topics.
+  # A name for this microphone: part of the MQTT topics and the Home Assistant entity id.
   name: front_door
-  # Anything ffmpeg can read. For a Frigate camera, use its go2rtc restream, ideally a
-  # stream that carries only one audio track.
-  url: rtsp://frigate.local:8554/front_door
+  # Anything ffmpeg can read, WITHOUT a login in it. For a Frigate camera, its go2rtc
+  # restream, ideally a stream with a single audio track:
+  # url: rtsp://frigate.local:8554/front_door_audio
+  # The login, if the stream needs one. Any characters: it is percent-encoded for you.
+  # username: restream
+  # password: secret
 
 mqtt:
   enabled: true
   host: homeassistant.local
   port: 1883
-  username: sound-detector
-  password: change-me
+  # username: mqtt-user
+  # password: secret
 
 web:
   port: 8080
   username: admin
-  # The clips are recordings of your doorstep: keep the labeling UI behind a password.
-  password: change-me
+  # The clips are recordings of your doorstep: keep the web UI behind a password.
+  password: WEB_PASSWORD
 
 collection:
   # Save a clip of every sound event, for labeling. Clips that trigger a detection are
@@ -37,4 +41,8 @@ detection:
   # Seconds without a hit before the sensor turns off again.
   off_delay: 10
   # Override the threshold training chose, per label:
-  # thresholds: {knock: 0.7}
+  # thresholds: {knock: 0.8}
+
+training:
+  # Training picks the threshold that finds the most sounds within this budget.
+  false_alarms_per_week: 1

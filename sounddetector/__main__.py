@@ -58,11 +58,14 @@ def cmd_train(cfg, args):
     store = _store(cfg)
     t = cfg["training"]
     report = train(store, yam, args.target, cfg["data_dir"], C=float(t["C"]),
-                   min_pos=int(t["min_positive_clips"]), min_neg=int(t["min_negative_clips"]))
+                   min_pos=int(t["min_positive_clips"]), min_neg=int(t["min_negative_clips"]),
+                   false_alarms_per_week=float(t["false_alarms_per_week"]))
     print(f"\n{'label':<16}{'clips':>6}{'mean':>7}{'max':>7}{'above':>7}")
     for row in report["categories"]:
         print(f"{row['label']:<16}{row['clips']:>6}{row['mean_score']:>7.2f}{row['max_score']:>7.2f}"
               f"{row['above_threshold']:>7}")
+    rule = report["threshold_rule"]
+    print(f"\nthreshold {report['threshold']}: " + ", ".join(f"{k} {v}" for k, v in rule.items()))
     targets = sorted(set(cfg["detection"]["targets"]) | {args.target})
     rescore(store, yam, load_targets(cfg["data_dir"], targets, yam.sha256))
     print("\nA running service picks the new model up within 10 seconds.")
@@ -86,7 +89,7 @@ def cmd_check(cfg, args):
     from .events import Segmenter, rms_dbfs
 
     seg = Segmenter.from_config(cfg["collection"])
-    src = LiveSource(cfg["source"]["url"], cfg["source"]["stall_timeout"], 2, loop=False)
+    src = LiveSource(config_mod.stream_url(cfg["source"]), cfg["source"]["stall_timeout"], 2, loop=False)
     end = time.time() + args.seconds
     buf = []
     for chunk in src:
@@ -137,6 +140,7 @@ def main(argv=None):
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     path = args.config if os.path.exists(args.config) or args.config != DEFAULT_CONFIG else None
     cfg = config_mod.load(path)
+    cfg["_config_path"] = path
     {"run": cmd_run, "ui": cmd_ui, "train": cmd_train, "import": cmd_import, "check": cmd_check,
      "download-model": cmd_download_model}[args.cmd](cfg, args)
 
