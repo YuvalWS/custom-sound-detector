@@ -299,3 +299,37 @@ def test_clips_saved_in_the_same_millisecond_get_usable_ids(tmp_path):
     for clip_id in ids:
         assert store.wav_path(clip_id).exists()
         store.set_label(clip_id, "knock")
+
+
+def test_stream_check_measures_a_file(tmp_path):
+    from sounddetector.audio import write_wav
+    from sounddetector.checks import test_stream
+
+    audio = knock(noise(4), 2.0)
+    write_wav(tmp_path / "a.wav", audio)
+    r = test_stream(str(tmp_path / "a.wav"))
+    assert r["ok"] and r["audio_tracks"][0]["sample_rate"] == "16000"
+    assert r["loudest_dbfs"] > r["level_dbfs"]
+    bad = test_stream(str(tmp_path / "missing.wav"))
+    assert not bad["ok"] and bad["error"]
+
+
+def test_mqtt_check_reports_an_unreachable_broker():
+    from sounddetector.checks import test_mqtt
+
+    r = test_mqtt("127.0.0.1", 1, None, None, timeout=2)
+    assert not r["ok"] and "cannot reach" in r["error"]
+
+
+def test_log_buffer_masks_stream_logins():
+    import logging
+
+    from sounddetector.logbuffer import BufferHandler
+
+    h = BufferHandler()
+    log = logging.getLogger("sounddetector.test")
+    log.addHandler(h)
+    log.warning("ffmpeg: rtsp://restream:hunter2@10.0.0.5:8554/door: 401 Unauthorized")
+    line = h.since(0)[-1]
+    assert "hunter2" not in line["msg"] and line["name"] == "test" and line["level"] == "WARNING"
+    assert h.since(line["seq"]) == []

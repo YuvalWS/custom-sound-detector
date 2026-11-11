@@ -56,7 +56,7 @@ DEFAULTS: dict = {
         # background (the median level of the last background_window seconds)...
         "trigger_db": 15.0,
         # ...and is at least this loud (dBFS). Use `sound-detector check` to see your levels.
-        "min_dbfs": -55.0,
+        "min_dbfs": -45.0,
         # It lasts while the level stays release_db above the background.
         "release_db": 6.0,
         "background_window": 10.0,

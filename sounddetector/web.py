@@ -202,6 +202,24 @@ class Server:
         self.request_restart()
         return {"saved": True, "restarting": True}
 
+    def run_test(self, kind: str, form: dict) -> dict:
+        """Test the stream or MQTT with the values in the form; empty secrets mean the saved ones."""
+        from . import checks
+        from .config import load, stream_url
+
+        saved = load(self.cfg.get("_config_path"))
+        if kind == "stream":
+            src = {**saved["source"], **{k: v for k, v in form.items() if k in ("url", "username") and v is not None}}
+            if form.get("password"):
+                src["password"] = form["password"]
+            return checks.test_stream(stream_url(src))
+        if kind == "mqtt":
+            given = {k: v for k, v in form.items() if k in ("host", "port", "username") and v is not None}
+            m = {**saved["mqtt"], **given}
+            return checks.test_mqtt(m.get("host"), int(m.get("port") or 1883), m.get("username"),
+                                    form.get("password") or m.get("password"))
+        raise ValueError("unknown test")
+
     def request_restart(self) -> None:
         """Exit cleanly once the response is out; systemd (Restart=always) starts us again."""
         import os
@@ -303,6 +321,10 @@ class Server:
                         self._send(200, wav.read_bytes(), "audio/wav")
                     elif parts == ["api", "settings"]:
                         self._json(server.settings())
+                    elif parts == ["api", "logs"]:
+                        from .logbuffer import HANDLER
+
+                        self._json({"lines": HANDLER.since(int(q.get("after", 0)), int(q.get("limit", 500)))})
                     elif parts == ["api", "report"]:
                         target = q.get("target", KNOCK)
                         if not valid_label(target):
@@ -347,6 +369,8 @@ class Server:
                         self._json({"categories": server.store.add_category(str(data.get("name", "")).strip())})
                     elif parts == ["api", "settings"]:
                         self._json(server.save_settings(data))
+                    elif len(parts) == 3 and parts[:2] == ["api", "test"]:
+                        self._json(server.run_test(parts[2], data))
                     elif parts == ["api", "train"]:
                         started = server.start_training(data.get("target", KNOCK))
                         self._json({"started": started, "job": server.jobs.state()}, 200 if started else 409)

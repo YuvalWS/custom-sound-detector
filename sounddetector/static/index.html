@@ -109,6 +109,7 @@ a { color: var(--accent); cursor: pointer; }
       <button data-tab="train">Train</button>
       <button data-tab="import">Import</button>
       <button data-tab="settings">Settings</button>
+      <button data-tab="logs">Logs</button>
     </nav>
   </div>
 </header>
@@ -226,7 +227,25 @@ a { color: var(--accent); cursor: pointer; }
       <span class="small muted" id="s-msg"></span>
     </div>
     <p class="small muted">Passwords are never shown here or sent to the browser: leave a password field empty to keep it.
+      "Test connection" uses what is in the form, and the saved password when its field is empty.
       Changes are stored in <code>settings.yaml</code> in the data directory and override the config file<span id="s-file"></span>.</p>
+  </div>
+</section>
+
+<section id="tab-logs" class="hidden">
+  <div class="panel">
+    <div class="row">
+      <select id="l-level">
+        <option value="all">Everything</option>
+        <option value="warn">Warnings and errors</option>
+      </select>
+      <label class="small row" style="gap:6px"><input type="checkbox" id="l-pause"> Pause</label>
+      <span class="spacer"></span>
+      <button class="btn" id="l-download">Download</button>
+    </div>
+    <pre class="log" id="l-lines" style="max-height:70vh;margin-top:12px"></pre>
+    <p class="small muted">The last 2,000 lines since the service started. Logins in stream URLs are masked.
+      The full history is in the container: <code>journalctl -u sound-detector</code>.</p>
   </div>
 </section>
 
@@ -671,7 +690,10 @@ async function loadSettings() {
   SETTINGS = await api("/api/settings");
   $("s-pending").classList.toggle("hidden", !SETTINGS.restart_pending);
   $("s-file").textContent = SETTINGS.config_file ? ` (${SETTINGS.config_file})` : "";
-  $("s-form").innerHTML = FIELDS.map(([title, fields]) => `<div class="panel"><h2>${esc(title)}</h2><div class="form">${fields.map(fieldHtml).join("")}</div></div>`).join("");
+  const TESTS = { Stream: "stream", MQTT: "mqtt" };
+  $("s-form").innerHTML = FIELDS.map(([title, fields]) => `<div class="panel"><h2>${esc(title)}</h2><div class="form">${fields.map(fieldHtml).join("")}</div>` +
+    (TESTS[title] ? `<div class="row" style="margin-top:14px"><button class="btn" data-test="${TESTS[title]}">Test connection</button><span class="small" id="test-${TESTS[title]}"></span></div>` : "") +
+    `</div>`).join("");
 }
 function collectSettings() {
   const out = {};
@@ -709,6 +731,51 @@ $("s-save").onclick = async () => {
   } catch (e) { $("s-msg").textContent = e.message; $("s-save").disabled = false; }
 };
 setInterval(() => { const h = $("level-hint"); if (h) h.textContent = levelHint(); }, 5000);
+$("s-form").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-test]"); if (!btn) return;
+  const kind = btn.dataset.test, out = $(`test-${kind}`), val = (sec, key) => $(`f-${sec}-${key}`).value.trim();
+  const form = kind === "stream"
+    ? { url: val("source", "url"), username: val("source", "username"), password: $("f-source-password").value }
+    : { host: val("mqtt", "host"), port: val("mqtt", "port"), username: val("mqtt", "username"), password: $("f-mqtt-password").value };
+  btn.disabled = true; out.style.color = ""; out.textContent = "Testing… (up to 20 seconds)";
+  try {
+    const r = await post(`/api/test/${kind}`, form);
+    out.style.color = r.ok ? "var(--good)" : "var(--bad)";
+    if (!r.ok) out.textContent = `✖ ${r.error}`;
+    else if (kind === "mqtt") out.textContent = "✔ Logged in to the broker.";
+    else {
+      const t = r.audio_tracks.map((a) => `${a.codec_name} ${a.sample_rate} Hz${a.channels === 1 ? " mono" : ""}`).join(", ");
+      out.textContent = `✔ Audio arrives: ${t}. ${r.seconds}s measured: level ${r.level_dbfs} dBFS, loudest ${r.loudest_dbfs} dBFS.` + (r.warning ? ` ⚠ ${r.warning}` : "");
+    }
+  } catch (err) { out.style.color = "var(--bad)"; out.textContent = `✖ ${err.message}`; }
+  btn.disabled = false;
+});
+
+// ---- logs tab ------------------------------------------------------------------------
+const logs = { lines: [], after: 0, timer: null };
+function renderLogs() {
+  const warnOnly = $("l-level").value === "warn";
+  const el = $("l-lines"), atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+  el.textContent = logs.lines.filter((l) => !warnOnly || l.level === "WARNING" || l.level === "ERROR" || l.level === "CRITICAL")
+    .map((l) => `${new Date(l.time * 1000).toLocaleTimeString()} ${l.level.padEnd(7)} ${l.name}: ${l.msg}`).join("\n") || "No log lines yet.";
+  if (atBottom) el.scrollTop = el.scrollHeight;
+}
+async function pollLogs() {
+  if ($("tab-logs").classList.contains("hidden")) { logs.timer = null; return; }
+  if (!$("l-pause").checked) {
+    try {
+      const r = await api(`/api/logs?after=${logs.after}`);
+      if (r.lines.length) { logs.lines.push(...r.lines); logs.lines = logs.lines.slice(-2000); logs.after = r.lines[r.lines.length - 1].seq; renderLogs(); }
+    } catch (e) { /* the service may be restarting */ }
+  }
+  logs.timer = setTimeout(pollLogs, 2000);
+}
+$("l-level").onchange = renderLogs;
+$("l-download").onclick = () => {
+  const text = logs.lines.map((l) => `${new Date(l.time * 1000).toISOString()} ${l.level} ${l.name}: ${l.msg}`).join("\n");
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+  a.download = "sound-detector.log"; a.click();
+};
 
 // ---- tabs ---------------------------------------------------------------------------
 function switchTab(name) {
@@ -718,6 +785,7 @@ function switchTab(name) {
   if (name === "browse") loadBrowse();
   if (name === "train") pollJob();
   if (name === "settings") loadSettings().catch((e) => toast(e.message));
+  if (name === "logs" && !logs.timer) { renderLogs(); pollLogs(); }
   store.set("tab", name);
 }
 document.querySelectorAll("#tabs button").forEach((b) => b.onclick = () => switchTab(b.dataset.tab));

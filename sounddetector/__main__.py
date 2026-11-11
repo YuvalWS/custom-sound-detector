@@ -138,6 +138,9 @@ def main(argv=None):
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    from . import logbuffer
+
+    logbuffer.install()
     path = args.config if os.path.exists(args.config) or args.config != DEFAULT_CONFIG else None
     cfg = config_mod.load(path)
     cfg["_config_path"] = path

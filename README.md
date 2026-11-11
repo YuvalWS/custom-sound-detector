@@ -43,8 +43,9 @@ a CPU, and gets better every time you label a missed sound or a false alarm.
 
 1. **Listen.** ffmpeg reads the audio stream (RTSP, HTTP or anything else ffmpeg reads) as
    16 kHz mono.
-2. **Collect.** A sound event starts when the level rises well above the background, and is
-   saved as a short WAV clip with half a second of context. Each clip gets YAMNet's own top
+2. **Collect.** A sound event starts when the level rises 15 dB above the background and is
+   at least `collection.min_dbfs` loud (-45 dBFS by default), and is saved as a short WAV clip
+   with half a second of context. Nothing else is recorded: there is no continuous recording. Each clip gets YAMNet's own top
    guesses as hints ("Knock 0.59, Speech 0.41").
 3. **Label.** In the web UI: knock, not a knock, or a category (footsteps, voice, keys, door,
    ...). Categories are optional; they show which sounds the model confuses, and any category
@@ -85,6 +86,10 @@ To update later:
 ```bash
 pct exec <ctid> -- update
 ```
+
+An update replaces only the code in `/opt/sound-detector` and its Python packages. It never
+touches the config file, the data directory (clips, labels, models, reports, `settings.yaml`)
+or the YAMNet model file, and it restarts the service.
 
 ### Any Debian or Ubuntu machine
 
@@ -224,8 +229,10 @@ The installed wrapper reads `/etc/sound-detector/config.yaml`; pass `-c` for ano
 ## Configuration
 
 The **Settings** tab of the web UI changes the common settings: the stream and its login,
-MQTT, collection, detection, the false-alarm budget and the UI's own password. Saving
-restarts the service. The changes go to `settings.yaml` in the data directory and override
+MQTT, collection, detection, the false-alarm budget and the UI's own password. "Test
+connection" checks the stream (its audio tracks and a few seconds of level) and the MQTT
+login with the values in the form, before you save. Saving restarts the service. The **Logs**
+tab shows the service's recent log. The changes go to `settings.yaml` in the data directory and override
 the config file key by key (the service can't write to `/etc`).
 
 All options, with defaults and explanations, are in

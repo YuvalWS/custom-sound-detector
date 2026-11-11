@@ -31,7 +31,7 @@ collection:
   enabled: true
   # A sound event starts 15 dB above the background and at least this loud.
   # `sound-detector check` prints your stream's levels.
-  min_dbfs: -55
+  min_dbfs: -45
   max_clips_per_hour: 120
   max_disk_mb: 2000
 
