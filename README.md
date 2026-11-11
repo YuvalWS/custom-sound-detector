@@ -182,7 +182,9 @@ A good first dataset:
 - At least 5 target clips and 10 others are needed.
 
 The running service picks up a new model within seconds. The previous one is kept in
-`models/history/`. A model is tied to the YAMNet file it was trained with, so a different
+`models/history/`, with the report it came with. Every model file (about 45 kB, plus about
+50 bytes per training clip) lists its training set: each clip's id and the label it had at
+training time, so any past model stays traceable after labels change or clips are deleted. A model is tied to the YAMNet file it was trained with, so a different
 YAMNet file means retraining.
 
 ## Home Assistant

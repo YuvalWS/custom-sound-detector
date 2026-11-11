@@ -172,9 +172,16 @@ def test_training_report_and_model(tmp_path):
     assert set(models) == {"knock"}
     # A model trained on other features is refused.
     assert load_targets(tmp_path, ["knock"], "0" * 64) == {}
-    # Retraining keeps the previous model.
+    # Each model lists its training set, with the labels the clips had then.
+    data = json.loads((tmp_path / "models" / "knock.json").read_text())
+    assert len(data["training_set"]) == 20 and {lab for _, lab in data["training_set"]} == {
+        "knock", "doorbell_chime", "not_knock"}
+    # Retraining keeps the previous model and its report.
     train(store, FakeYamNet(), "knock", tmp_path)
-    assert len(list((tmp_path / "models" / "history").glob("knock-*.json"))) == 1
+    history = tmp_path / "models" / "history"
+    assert len(list(history.glob("knock-*.report.json"))) == 1
+    assert len([p for p in history.glob("knock-*.json") if not p.name.endswith(".report.json")]) == 1
+    assert (tmp_path / "reports" / "knock.json").exists()
 
 
 def test_event_counts_give_events_per_day(tmp_path):

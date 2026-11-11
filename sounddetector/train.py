@@ -201,16 +201,21 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
         "yamnet_sha256": yamnet.sha256,
         "C": C,
         "summary": {k: report[k] for k in ("clips", "positive_clips", "negative_clips", "cv", "threshold_rule")},
+        # Which recordings, with the label each had then: a model stays traceable after a
+        # label changes or a clip is deleted.
+        "training_set": [[m["id"], m["label"]] for m in used],
     }
     model = TargetModel(data)
     path = model_path(data_dir, target)
-    if path.exists():
+    report_path = Path(data_dir) / "reports" / f"{target}.json"
+    if path.exists():  # keep the previous model, and the report that came with it
         history = path.parent / "history"
         history.mkdir(parents=True, exist_ok=True)
         stamp = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y%m%d-%H%M%S")
         path.replace(history / f"{target}-{stamp}.json")
+        if report_path.exists():
+            report_path.replace(history / f"{target}-{stamp}.report.json")
     model.save(path)
-    report_path = Path(data_dir) / "reports" / f"{target}.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=1))
     rule = choice["rule"]
