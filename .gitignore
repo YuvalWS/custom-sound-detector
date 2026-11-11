@@ -1,0 +1,14 @@
+# Recordings, labels and models: private, never in git.
+data/
+*.wav
+*.npz
+*.tflite
+config.yaml
+secrets*
+__pycache__/
+*.egg-info/
+.venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/

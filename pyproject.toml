@@ -1,0 +1,43 @@
+[project]
+name = "custom-sound-detector"
+dynamic = ["version"]
+description = "Collect, label and detect a custom sound (like a knock on the door) from a camera's audio stream, on YAMNet features."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "ai-edge-litert>=1.4",
+  "paho-mqtt>=2.0",
+  "PyYAML>=6.0",
+  "scikit-learn>=1.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+sound-detector = "sounddetector.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["sounddetector", "sounddetector.static"]
+
+[tool.setuptools.dynamic]
+version = { attr = "sounddetector.__version__" }
+
+[tool.setuptools.package-data]
+"sounddetector.static" = ["*.html"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

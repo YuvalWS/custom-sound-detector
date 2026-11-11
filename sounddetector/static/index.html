@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sound detector</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --panel-2: #eef0f4; --text: #1b1f27; --muted: #5d6675;
+  --border: #d9dde5; --accent: #2f6fe4; --accent-text: #ffffff; --good: #1f8a4c; --warn: #b26b00;
+  --bad: #c43c3c; --chip: #e7ebf3; --focus: #2f6fe455;
+  --knock: #2f6fe4; --neg: #5d6675;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151b; --panel: #1b2029; --panel-2: #232a35; --text: #e6e9ef; --muted: #9aa3b2;
+    --border: #2e3644; --accent: #5b8ef0; --accent-text: #0d1117; --good: #45b97a; --warn: #e0a040;
+    --bad: #ec6b6b; --chip: #283141; --focus: #5b8ef055; --knock: #5b8ef0; --neg: #9aa3b2;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+button, select, input { font: inherit; color: inherit; }
+header { background: var(--panel); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5; }
+.bar { max-width: 1100px; margin: 0 auto; padding: 10px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+h1 { font-size: 17px; margin: 0; font-weight: 650; }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--muted); margin-right: 6px; }
+.dot.on { background: var(--good); } .dot.off { background: var(--bad); }
+.status { color: var(--muted); font-size: 13px; }
+.spacer { flex: 1; }
+nav { display: flex; gap: 4px; }
+nav button { background: none; border: 0; padding: 7px 12px; border-radius: 8px; cursor: pointer; color: var(--muted); }
+nav button.active { background: var(--panel-2); color: var(--text); font-weight: 600; }
+main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.muted { color: var(--muted); } .small { font-size: 13px; }
+select, input[type=text], input[type=number] { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; }
+.btn { border: 1px solid var(--border); background: var(--panel); padding: 8px 14px; border-radius: 9px; cursor: pointer; }
+.btn:hover { background: var(--panel-2); }
+.btn:focus-visible, select:focus-visible, input:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
+.btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.btn.danger { color: var(--bad); }
+.btn[disabled] { opacity: .5; cursor: default; }
+kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px;
+  padding: 0 5px; margin-left: 6px; color: var(--muted); background: var(--panel-2); }
+.chip { display: inline-flex; align-items: center; gap: 4px; background: var(--chip); border-radius: 999px; padding: 2px 10px; font-size: 13px; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.stat { display: inline-flex; gap: 6px; align-items: baseline; }
+.stat b { font-size: 15px; }
+.big-labels { display: grid; grid-template-columns: 2fr 2fr 1fr 1fr; gap: 10px; margin-top: 14px; }
+.big-labels .btn { padding: 14px 10px; font-size: 16px; font-weight: 600; }
+.btn.knock { background: var(--knock); color: var(--accent-text); border-color: var(--knock); }
+.btn.knock.current, .btn.neg.current, .cat.current { outline: 3px solid var(--warn); outline-offset: 2px; }
+.cats { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.cat { border: 1px solid var(--border); background: var(--panel-2); border-radius: 999px; padding: 6px 12px; cursor: pointer; }
+.cat:hover { border-color: var(--accent); }
+.cat kbd { margin-left: 4px; }
+.spec-wrap { position: relative; margin-top: 12px; border-radius: 10px; overflow: hidden; background: #0b0e14; cursor: pointer; }
+canvas.spec { display: block; width: 100%; height: 180px; image-rendering: auto; }
+.playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; opacity: .85; left: 0; pointer-events: none; }
+.onset { position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px dashed #ffd166; opacity: .8; pointer-events: none; }
+.freq { position: absolute; left: 6px; font-size: 11px; color: #ffffffb0; pointer-events: none; }
+.meta-line { display: flex; gap: 14px; flex-wrap: wrap; font-size: 14px; }
+.scorebar { width: 120px; height: 8px; border-radius: 4px; background: var(--panel-2); overflow: hidden; display: inline-block; vertical-align: middle; }
+.scorebar i { display: block; height: 100%; background: var(--accent); }
+.empty { text-align: center; padding: 40px 10px; color: var(--muted); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+th { color: var(--muted); font-weight: 600; font-size: 13px; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.sel { background: var(--panel-2); }
+.label-tag { font-weight: 600; } .label-tag.knock { color: var(--knock); } .label-tag.none { color: var(--muted); font-weight: 400; }
+pre.log { background: var(--panel-2); border-radius: 8px; padding: 10px; max-height: 240px; overflow: auto; font-size: 12.5px; white-space: pre-wrap; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.card { background: var(--panel-2); border-radius: 10px; padding: 10px 12px; }
+.card .v { font-size: 22px; font-weight: 650; }
+.drop { border: 2px dashed var(--border); border-radius: 12px; padding: 30px; text-align: center; color: var(--muted); }
+.drop.over { border-color: var(--accent); color: var(--text); }
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
+  padding: 8px 14px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 10; }
+.toast.show { opacity: .95; }
+.hidden { display: none !important; }
+a { color: var(--accent); cursor: pointer; }
+@media (max-width: 640px) {
+  .big-labels { grid-template-columns: 1fr 1fr; }
+  kbd { display: none; }
+  canvas.spec { height: 150px; }
+  .hide-sm { display: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1>Sound detector</h1>
+    <span class="status" id="status"><span class="dot"></span>…</span>
+    <span class="spacer"></span>
+    <nav id="tabs">
+      <button data-tab="label" class="active">Label</button>
+      <button data-tab="browse">Browse</button>
+      <button data-tab="train">Train</button>
+      <button data-tab="import">Import</button>
+    </nav>
+  </div>
+</header>
+<main>
+
+<section id="tab-label">
+  <div class="panel">
+    <div class="row">
+      <label class="small muted" for="queue">Queue</label>
+      <select id="queue">
+        <option value="unlabeled:newest">Unlabeled, newest first</option>
+        <option value="unlabeled:oldest">Unlabeled, oldest first</option>
+        <option value="unlabeled:score">Unlabeled, highest knock score first</option>
+        <option value="detected:newest">Detections (to catch false alarms)</option>
+        <option value="not_knock:newest">"Not a knock" without a category</option>
+        <option value="all:newest">Everything, newest first</option>
+      </select>
+      <span class="small muted" id="queue-count"></span>
+      <span class="spacer"></span>
+      <label class="small row" style="gap:6px"><input type="checkbox" id="autoplay" checked> Autoplay</label>
+    </div>
+  </div>
+
+  <div class="panel" id="clip-panel">
+    <div id="clip-empty" class="empty hidden">Nothing to label here. New sounds show up as they are heard.</div>
+    <div id="clip-body">
+      <div class="meta-line" id="clip-meta"></div>
+      <div class="chips" id="clip-hints" style="margin-top:8px"></div>
+      <div class="spec-wrap" id="spec-wrap" title="Click to play from here">
+        <canvas class="spec" id="spec"></canvas>
+        <div class="onset" id="onset"></div>
+        <div class="playhead" id="playhead"></div>
+        <span class="freq" style="top:4px">8 kHz</span>
+        <span class="freq" style="bottom:4px">0</span>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn" id="play">▶ Play<kbd>Space</kbd></button>
+        <button class="btn" id="prev">← Prev<kbd>←</kbd></button>
+        <button class="btn" id="next">Skip →<kbd>→</kbd></button>
+        <span class="spacer"></span>
+        <button class="btn" id="undo" disabled>Undo<kbd>Z</kbd></button>
+      </div>
+      <div class="big-labels">
+        <button class="btn knock" data-label="knock">Knock<kbd>K</kbd></button>
+        <button class="btn neg" data-label="not_knock">Not a knock<kbd>N</kbd></button>
+        <button class="btn" data-label="unsure">Unsure<kbd>U</kbd></button>
+        <button class="btn danger" id="delete">Delete<kbd>Del</kbd></button>
+      </div>
+      <div class="small muted" style="margin-top:14px">Know what it is? Pick a category instead of "Not a knock" (optional, but it shows what the model confuses):</div>
+      <div class="cats" id="cats"></div>
+      <div class="row" style="margin-top:10px">
+        <input type="text" id="new-cat" placeholder="new category, e.g. stroller" maxlength="32" style="width:220px">
+        <button class="btn" id="add-cat">Add and label</button>
+      </div>
+    </div>
+  </div>
+  <p class="small muted">A clip with a knock in it is a knock, even if there is talking too. "Unsure" clips are kept but never used for training.</p>
+</section>
+
+<section id="tab-browse" class="hidden">
+  <div class="panel">
+    <div class="row">
+      <select id="b-label"></select>
+      <select id="b-sort">
+        <option value="newest">Newest</option><option value="oldest">Oldest</option>
+        <option value="score">Highest knock score</option><option value="loudest">Loudest</option>
+      </select>
+      <label class="small row" style="gap:6px"><input type="checkbox" id="b-detected"> Detections only</label>
+      <span class="spacer"></span>
+      <span class="small muted" id="b-count"></span>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <span class="small"><b id="b-selcount">0</b> selected</span>
+      <select id="b-bulk-label"></select>
+      <button class="btn" id="b-apply">Label selected</button>
+      <button class="btn" id="b-review">Open selected in Label</button>
+      <button class="btn danger" id="b-delete">Delete selected</button>
+    </div>
+  </div>
+  <div class="panel" style="padding:0; overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th><input type="checkbox" id="b-all" aria-label="Select all"></th><th></th><th>Recorded</th>
+        <th class="num hide-sm">Length</th><th class="num hide-sm">Peak</th><th class="hide-sm">Sounds like</th>
+        <th class="num">Knock score</th><th>Label</th>
+      </tr></thead>
+      <tbody id="b-rows"></tbody>
+    </table>
+    <div class="row" style="padding:12px"><button class="btn" id="b-more">Load more</button></div>
+  </div>
+</section>
+
+<section id="tab-train" class="hidden">
+  <div class="panel">
+    <div class="row">
+      <label for="t-target" class="small muted">Model for</label>
+      <select id="t-target"></select>
+      <button class="btn primary" id="t-start">Train</button>
+      <span class="small muted" id="t-need"></span>
+    </div>
+    <p class="small muted">Training uses every labeled clip: the chosen label against all the others. It takes seconds to
+      a few minutes, and a running detector switches to the new model straight away. The previous model is kept in
+      <code>models/history/</code>.</p>
+    <pre class="log hidden" id="t-log"></pre>
+  </div>
+  <div id="t-report"></div>
+</section>
+
+<section id="tab-import" class="hidden">
+  <div class="panel">
+    <p style="margin-top:0">Add recordings you already have, such as a Frigate clip of someone knocking. Any audio or video
+      file works.</p>
+    <div class="row">
+      <label class="small muted" for="i-label">Label all as</label>
+      <select id="i-label"></select>
+      <label class="small row" style="gap:6px"><input type="checkbox" id="i-split" checked> Split into separate sounds</label>
+    </div>
+    <div class="drop" id="drop" style="margin-top:12px">Drop files here, or <a id="pick">choose files</a>
+      <input type="file" id="files" multiple class="hidden" accept="audio/*,video/*"></div>
+    <div id="i-results" class="small" style="margin-top:12px"></div>
+  </div>
+</section>
+
+</main>
+<audio id="audio" preload="auto"></audio>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const FIXED = { knock: "Knock", not_knock: "Not a knock", unsure: "Unsure" };
+let STATUS = null;
+const state = { queue: [], i: 0, undo: [], audioUrl: null, current: null, specCache: new Map() };
+const store = { get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+                set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} } };
+
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove("show"), 1600); }
+async function api(path, opts = {}) {
+  const res = await fetch(path, opts);
+  const body = res.headers.get("content-type")?.includes("json") ? await res.json() : null;
+  if (!res.ok) throw new Error(body?.error || res.statusText);
+  return body;
+}
+const post = (path, data) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data || {}) });
+const pretty = (l) => l ? (FIXED[l] || l.replace(/_/g, " ")) : "unlabeled";
+const fmtTime = (iso) => { const d = new Date(iso); return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }); };
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function allLabels() { return ["knock", "not_knock", ...(STATUS?.categories || []), "unsure"]; }
+
+// ---- status -------------------------------------------------------------------------
+async function refreshStatus() {
+  try { STATUS = await api("/api/status"); } catch (e) { $("status").innerHTML = `<span class="dot off"></span>${esc(e.message)}`; return; }
+  const s = STATUS.service, st = STATUS.stats;
+  const conn = s.connected === null ? "" : s.connected ? `<span class="dot on"></span>listening to ${esc(s.source)}` : `<span class="dot off"></span>${esc(s.source)} not connected`;
+  const level = s.level_dbfs !== undefined && s.connected ? ` · ${s.level_dbfs} dBFS` : "";
+  const mode = s.models && Object.keys(s.models).length ? " · detecting" : (s.collecting ? " · collecting" : "");
+  const knocks = st.labels.knock || 0, other = st.total - st.unlabeled - knocks;
+  const parts = [conn + level + mode, `<span class="stat"><b>${st.unlabeled}</b> to label</span>`, `${knocks} knock${knocks === 1 ? "" : "s"}`, `${other} other`].filter(Boolean);
+  $("status").innerHTML = parts.join(" · ");
+  renderCats();
+  fillLabelSelects();
+}
+setInterval(refreshStatus, 5000);
+
+// ---- spectrogram --------------------------------------------------------------------
+function parseWav(buf) {
+  const v = new DataView(buf); let off = 12, data = null, rate = 16000;
+  while (off + 8 <= v.byteLength) {
+    const id = String.fromCharCode(v.getUint8(off), v.getUint8(off + 1), v.getUint8(off + 2), v.getUint8(off + 3));
+    const size = v.getUint32(off + 4, true);
+    if (id === "fmt ") rate = v.getUint32(off + 12, true);
+    if (id === "data") { data = new Int16Array(buf.slice(off + 8, off + 8 + size)); break; }
+    off += 8 + size + (size % 2);
+  }
+  return { samples: data || new Int16Array(0), rate };
+}
+function fft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) { let bit = n >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit; if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; } }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) { let cr = 1, ci = 0;
+      for (let j = 0; j < len / 2; j++) { const a = i + j, b = a + len / 2;
+        const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+        const nr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = nr; } }
+  }
+}
+function color(t) { // dark blue -> purple -> orange -> pale yellow; readable on both themes
+  const stops = [[11, 14, 20], [45, 30, 110], [150, 45, 130], [235, 110, 60], [252, 230, 150]];
+  t = Math.max(0, Math.min(1, t)) * (stops.length - 1); const i = Math.min(stops.length - 2, Math.floor(t)), f = t - i;
+  return stops[i].map((c, k) => Math.round(c + (stops[i + 1][k] - c) * f));
+}
+function drawSpectrogram(canvas, samples) {
+  const N = 512, HOP = 128, H = 200, cols = Math.max(1, Math.floor((samples.length - N) / HOP) + 1);
+  canvas.width = cols; canvas.height = H;
+  const ctx = canvas.getContext("2d"), img = ctx.createImageData(cols, H);
+  const win = new Float32Array(N).map((_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (N - 1)));
+  const mags = new Float32Array(cols * (N / 2)); let max = -Infinity;
+  for (let c = 0; c < cols; c++) {
+    const re = new Float32Array(N), im = new Float32Array(N);
+    for (let i = 0; i < N; i++) re[i] = (samples[c * HOP + i] || 0) / 32768 * win[i];
+    fft(re, im);
+    for (let k = 0; k < N / 2; k++) { const m = 10 * Math.log10(re[k] * re[k] + im[k] * im[k] + 1e-10); mags[c * N / 2 + k] = m; if (m > max) max = m; }
+  }
+  const floor = max - 70;
+  for (let y = 0; y < H; y++) {
+    const frac = 1 - y / (H - 1), k = Math.min(N / 2 - 1, Math.round(frac * frac * (N / 2 - 1))); // more room for low frequencies
+    for (let c = 0; c < cols; c++) {
+      const [r, g, b] = color((mags[c * N / 2 + k] - floor) / 70), p = (y * cols + c) * 4;
+      img.data[p] = r; img.data[p + 1] = g; img.data[p + 2] = b; img.data[p + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+async function loadAudio(id) {
+  if (state.specCache.has(id)) return state.specCache.get(id);
+  const p = fetch(`/api/clips/${encodeURIComponent(id)}/audio`).then((r) => { if (!r.ok) throw new Error("audio missing"); return r.arrayBuffer(); })
+    .then((buf) => ({ buf, ...parseWav(buf) }));
+  state.specCache.set(id, p);
+  if (state.specCache.size > 12) state.specCache.delete(state.specCache.keys().next().value);
+  return p;
+}
+
+// ---- label tab ----------------------------------------------------------------------
+const audio = $("audio");
+function queueParams() { const [label, sort] = $("queue").value.split(":"); return { label, sort }; }
+async function loadQueue(keepId) {
+  const { label, sort } = queueParams();
+  const q = label === "detected" ? `label=all&detected=1&sort=${sort}` : `label=${label}&sort=${sort}`;
+  const res = await api(`/api/clips?${q}&limit=1000`);
+  state.queue = res.clips; state.i = 0;
+  if (keepId) { const j = state.queue.findIndex((c) => c.id === keepId); if (j >= 0) state.i = j; }
+  showClip();
+}
+async function openIds(ids, title, startId) {
+  const res = await api(`/api/clips?label=all&ids=${encodeURIComponent(ids.join(","))}&limit=2000`);
+  const order = new Map(ids.map((id, i) => [id, i]));
+  state.queue = res.clips.sort((a, b) => order.get(a.id) - order.get(b.id));
+  state.i = Math.max(0, state.queue.findIndex((c) => c.id === startId));
+  let opt = $("queue").querySelector('option[value="custom"]');
+  if (!opt) { opt = document.createElement("option"); opt.value = "custom"; $("queue").appendChild(opt); }
+  opt.textContent = title; $("queue").value = "custom";
+  switchTab("label"); showClip();
+}
+function updateCount() {
+  const n = state.queue.length;
+  $("queue-count").textContent = n ? `${Math.min(state.i + 1, n)} of ${n}` : "";
+}
+async function showClip() {
+  updateCount();
+  const clip = state.queue[state.i];
+  state.current = clip || null;
+  $("clip-empty").classList.toggle("hidden", !!clip);
+  $("clip-body").classList.toggle("hidden", !clip);
+  audio.pause();
+  if (!clip) return;
+  const best = {};
+  for (const d of clip.detections || []) best[d.target] = Math.max(best[d.target] || 0, d.score);
+  const det = Object.keys(best).length ? `<span class="chip" style="background:var(--accent);color:var(--accent-text)">detected: ${esc(Object.entries(best).map(([t, sc]) => `${pretty(t)} ${sc.toFixed(2)}`).join(", "))}</span>` : "";
+  const score = clip.scores && clip.scores.knock !== undefined ? `<span>knock score <span class="scorebar"><i style="width:${Math.round(clip.scores.knock * 100)}%"></i></span> ${clip.scores.knock.toFixed(2)}</span>` : "";
+  const src = clip.imported_from ? `<span class="muted">imported: ${esc(clip.imported_from)}</span>` : "";
+  $("clip-meta").innerHTML = `<b>${esc(fmtTime(clip.recorded_at))}</b><span class="muted">${clip.duration}s</span>` +
+    (clip.peak_dbfs != null ? `<span class="muted">peak ${clip.peak_dbfs} dBFS</span>` : "") + score + src +
+    `<span>label: <span class="label-tag ${clip.label === "knock" ? "knock" : clip.label ? "" : "none"}">${esc(pretty(clip.label))}</span></span>` + det;
+  $("clip-hints").innerHTML = (clip.hints || []).map(([n, s]) => `<span class="chip" title="Stock YAMNet guess">${esc(n)} ${s}</span>`).join("") || "";
+  document.querySelectorAll("[data-label]").forEach((b) => b.classList.toggle("current", b.dataset.label === clip.label));
+  renderCats();
+  const onset = $("onset");
+  onset.style.display = clip.onset ? "" : "none";
+  onset.style.left = `${(clip.onset / clip.duration) * 100}%`;
+  $("playhead").style.left = "0";
+  try {
+    const { buf, samples } = await loadAudio(clip.id);
+    if (state.current !== clip) return;
+    drawSpectrogram($("spec"), samples);
+    if (state.audioUrl) URL.revokeObjectURL(state.audioUrl);
+    state.audioUrl = URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+    audio.src = state.audioUrl;
+    if ($("autoplay").checked) audio.play().catch(() => {});
+  } catch (e) { toast(e.message); }
+  const next = state.queue[state.i + 1]; if (next) loadAudio(next.id).catch(() => {});
+}
+function removesFromQueue(label) {
+  const { label: ql } = queueParams();
+  return (ql === "unlabeled") || (ql === "not_knock" && label !== "not_knock");
+}
+async function applyLabel(label) {
+  const clip = state.current; if (!clip) return;
+  try {
+    const prev = clip.label;
+    const updated = await post(`/api/clips/${encodeURIComponent(clip.id)}/label`, { label });
+    state.undo.push({ clip: { ...clip }, prev, index: state.i, removed: removesFromQueue(label) });
+    $("undo").disabled = false;
+    Object.assign(clip, updated);
+    toast(`${pretty(label)}`);
+    if (removesFromQueue(label)) state.queue.splice(state.i, 1); else state.i++;
+    showClip(); refreshStatus();
+  } catch (e) { toast(e.message); }
+}
+async function undo() {
+  const u = state.undo.pop(); if (!u) return;
+  $("undo").disabled = !state.undo.length;
+  try {
+    const restored = await post(`/api/clips/${encodeURIComponent(u.clip.id)}/label`, { label: u.prev });
+    if (u.removed) state.queue.splice(u.index, 0, restored);
+    else { const j = state.queue.findIndex((c) => c.id === u.clip.id); if (j >= 0) state.queue[j] = restored; }
+    state.i = Math.min(u.index, state.queue.length - 1); showClip(); refreshStatus(); toast("Undone");
+  } catch (e) { toast(e.message); }
+}
+async function deleteCurrent() {
+  const clip = state.current; if (!clip) return;
+  if (!confirm("Delete this clip for good?")) return;
+  await post(`/api/clips/${encodeURIComponent(clip.id)}/delete`);
+  state.queue.splice(state.i, 1); showClip(); refreshStatus(); toast("Deleted");
+}
+function renderCats() {
+  const cats = STATUS?.categories || [];
+  const cur = state.current?.label;
+  $("cats").innerHTML = cats.map((c, i) => `<button class="cat${cur === c ? " current" : ""}" data-cat="${esc(c)}">${esc(pretty(c))}${i < 10 ? `<kbd>${(i + 1) % 10}</kbd>` : ""}</button>`).join("");
+}
+$("cats").addEventListener("click", (e) => { const b = e.target.closest("[data-cat]"); if (b) applyLabel(b.dataset.cat); });
+document.querySelectorAll("[data-label]").forEach((b) => b.addEventListener("click", () => applyLabel(b.dataset.label)));
+$("delete").onclick = deleteCurrent;
+$("undo").onclick = undo;
+$("prev").onclick = () => { if (state.i > 0) { state.i--; showClip(); } };
+$("next").onclick = () => { if (state.i < state.queue.length - 1) { state.i++; showClip(); } };
+$("play").onclick = () => { if (audio.paused) { if (audio.ended) audio.currentTime = 0; audio.play().catch(() => {}); } else audio.pause(); };
+$("queue").onchange = () => { if ($("queue").value !== "custom") loadQueue(); };
+$("autoplay").checked = store.get("autoplay", true);
+$("autoplay").onchange = () => store.set("autoplay", $("autoplay").checked);
+$("spec-wrap").onclick = (e) => {
+  const r = e.currentTarget.getBoundingClientRect();
+  if (audio.duration) { audio.currentTime = ((e.clientX - r.left) / r.width) * audio.duration; audio.play().catch(() => {}); }
+};
+async function addCategory() {
+  const name = $("new-cat").value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (!name) return;
+  try { await post("/api/categories", { name }); $("new-cat").value = ""; await refreshStatus(); await applyLabel(name); } catch (e) { toast(e.message); }
+}
+$("add-cat").onclick = addCategory;
+$("new-cat").addEventListener("keydown", (e) => { if (e.key === "Enter") addCategory(); e.stopPropagation(); });
+(function tick() {
+  if (audio.duration) $("playhead").style.left = `${(audio.currentTime / audio.duration) * 100}%`;
+  $("play").firstChild.textContent = audio.paused ? "▶ Play" : "❚❚ Pause";
+  requestAnimationFrame(tick);
+})();
+document.addEventListener("keydown", (e) => {
+  if ($("tab-label").classList.contains("hidden") || e.target.matches("input, select, textarea") || e.ctrlKey || e.metaKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === " ") { e.preventDefault(); $("play").click(); }
+  else if (k === "k") applyLabel("knock");
+  else if (k === "n") applyLabel("not_knock");
+  else if (k === "u") applyLabel("unsure");
+  else if (k === "z") undo();
+  else if (k === "delete" || k === "backspace") deleteCurrent();
+  else if (k === "arrowleft") $("prev").click();
+  else if (k === "arrowright") $("next").click();
+  else if (/^[0-9]$/.test(k)) { const cats = STATUS?.categories || []; const c = cats[(Number(k) + 9) % 10]; if (c) applyLabel(c); }
+  else return;
+});
+
+// ---- browse tab ---------------------------------------------------------------------
+const browse = { offset: 0, selected: new Set(), rows: [] };
+function fillLabelSelects() {
+  const labels = allLabels();
+  const b = $("b-label"), keep = b.value;
+  b.innerHTML = [["all", "All clips"], ["unlabeled", "Unlabeled"], ["labeled", "Labeled"], ["negative", "Every non-knock label"],
+    ...labels.map((l) => [l, pretty(l)])].map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join("");
+  b.value = keep || "all";
+  for (const id of ["b-bulk-label", "i-label"]) {
+    const s = $(id), k = s.value;
+    s.innerHTML = (id === "i-label" ? `<option value="">(no label)</option>` : `<option value="">(remove label)</option>`) +
+      labels.map((l) => `<option value="${esc(l)}">${esc(pretty(l))}</option>`).join("");
+    s.value = k || (id === "b-bulk-label" ? "not_knock" : "");
+  }
+  const t = $("t-target"), tk = t.value, counts = STATUS?.stats.labels || {};
+  t.innerHTML = labels.filter((l) => l !== "unsure").map((l) => `<option value="${esc(l)}">${esc(pretty(l))} (${counts[l] || 0} clips)</option>`).join("");
+  t.value = tk || "knock";
+}
+async function loadBrowse(reset = true) {
+  if (reset) { browse.offset = 0; browse.rows = []; browse.selected.clear(); }
+  const q = `label=${encodeURIComponent($("b-label").value)}&sort=${$("b-sort").value}&detected=${$("b-detected").checked ? 1 : 0}&offset=${browse.offset}&limit=100`;
+  const res = await api(`/api/clips?${q}`);
+  browse.rows.push(...res.clips); browse.offset += res.clips.length;
+  $("b-count").textContent = `${res.total} clips`;
+  $("b-more").classList.toggle("hidden", browse.offset >= res.total);
+  renderBrowse();
+}
+function renderBrowse() {
+  $("b-rows").innerHTML = browse.rows.map((c) => `<tr data-id="${esc(c.id)}" class="${browse.selected.has(c.id) ? "sel" : ""}">
+    <td><input type="checkbox" class="b-sel" ${browse.selected.has(c.id) ? "checked" : ""} aria-label="Select"></td>
+    <td><button class="btn b-play" style="padding:3px 9px" aria-label="Play">▶</button></td>
+    <td><a class="b-open">${esc(fmtTime(c.recorded_at))}</a>${c.detections?.length ? ` <span class="chip">detected</span>` : ""}</td>
+    <td class="num hide-sm">${c.duration}s</td><td class="num hide-sm">${c.peak_dbfs ?? ""}</td>
+    <td class="hide-sm small">${esc((c.hints || []).map(([n, s]) => `${n} ${s}`).join(", "))}</td>
+    <td class="num">${c.scores?.knock !== undefined ? c.scores.knock.toFixed(2) : ""}</td>
+    <td><span class="label-tag ${c.label === "knock" ? "knock" : c.label ? "" : "none"}">${esc(pretty(c.label))}</span></td></tr>`).join("");
+  $("b-selcount").textContent = browse.selected.size;
+}
+$("b-rows").addEventListener("click", async (e) => {
+  const tr = e.target.closest("tr"); if (!tr) return; const id = tr.dataset.id;
+  if (e.target.classList.contains("b-sel")) { e.target.checked ? browse.selected.add(id) : browse.selected.delete(id); tr.classList.toggle("sel", e.target.checked); $("b-selcount").textContent = browse.selected.size; }
+  else if (e.target.closest(".b-play")) { const { buf } = await loadAudio(id); audio.src = URL.createObjectURL(new Blob([buf], { type: "audio/wav" })); audio.play().catch(() => {}); }
+  else if (e.target.closest(".b-open")) { openIds(browse.rows.map((r) => r.id), "From Browse", id); }
+});
+$("b-all").onchange = (e) => { browse.rows.forEach((r) => e.target.checked ? browse.selected.add(r.id) : browse.selected.delete(r.id)); renderBrowse(); };
+["b-label", "b-sort", "b-detected"].forEach((id) => $(id).onchange = () => loadBrowse());
+$("b-more").onclick = () => loadBrowse(false);
+$("b-apply").onclick = async () => {
+  if (!browse.selected.size) return toast("Select clips first");
+  const label = $("b-bulk-label").value || null;
+  const res = await post("/api/bulk-label", { ids: [...browse.selected], label });
+  toast(`Labeled ${res.updated} clips as ${pretty(label)}`); loadBrowse(); refreshStatus();
+};
+$("b-review").onclick = () => { if (browse.selected.size) openIds([...browse.selected], "Selected in Browse"); };
+$("b-delete").onclick = async () => {
+  if (!browse.selected.size || !confirm(`Delete ${browse.selected.size} clips for good?`)) return;
+  for (const id of browse.selected) await post(`/api/clips/${encodeURIComponent(id)}/delete`);
+  toast("Deleted"); loadBrowse(); refreshStatus();
+};
+
+// ---- train tab ----------------------------------------------------------------------
+async function loadReport() {
+  const target = $("t-target").value || "knock";
+  const counts = STATUS?.stats.labels || {}, pos = counts[target] || 0;
+  const neg = Object.entries(counts).filter(([l]) => l !== target && l !== "unsure").reduce((a, [, n]) => a + n, 0);
+  $("t-need").textContent = `${pos} ${pretty(target).toLowerCase()} clips, ${neg} others labeled (needs 5 and 10)`;
+  const r = await api(`/api/report?target=${encodeURIComponent(target)}`);
+  if (!r) { $("t-report").innerHTML = `<div class="panel muted">No model for "${esc(pretty(target))}" yet.</div>`; return; }
+  const cv = r.cv;
+  const rows = r.categories.map((c) => `<tr><td>${esc(pretty(c.label))}</td><td class="num">${c.clips}</td><td class="num">${c.mean_score.toFixed(2)}</td>
+    <td class="num">${c.max_score.toFixed(2)}</td><td class="num">${c.label === target ? `${c.above_threshold} found` : c.above_threshold ? `<b style="color:var(--bad)">${c.above_threshold} false</b>` : "0"}</td>
+    <td><a data-review="${esc(c.label)}">review</a></td></tr>`).join("");
+  $("t-report").innerHTML = `<div class="panel">
+    <div class="row" style="margin-bottom:12px"><b>Model for "${esc(pretty(target))}"</b><span class="muted small">trained ${esc(fmtTime(r.trained_at))}</span></div>
+    <div class="cards">
+      <div class="card"><div class="muted small">Clips used</div><div class="v">${r.clips}</div><div class="small muted">${r.positive_clips} ${esc(pretty(target).toLowerCase())}, ${r.negative_clips} other</div></div>
+      <div class="card"><div class="muted small">Threshold</div><div class="v">${r.threshold.toFixed(2)}</div><div class="small muted">best balance found</div></div>
+      <div class="card"><div class="muted small">Found (recall)</div><div class="v">${Math.round(cv.recall * 100)}%</div><div class="small muted">${cv.true_positives} found, ${cv.missed} missed</div></div>
+      <div class="card"><div class="muted small">Correct alerts (precision)</div><div class="v">${Math.round(cv.precision * 100)}%</div><div class="small muted">${cv.false_positives} false alarms</div></div>
+    </div>
+    <p class="small muted">Measured on clips the model did not see while training (${r.folds}-fold cross-validation). With few clips these numbers swing a lot.</p>
+    </div>
+    <div class="panel"><b>What gets confused with "${esc(pretty(target))}"</b>
+    <p class="small muted" style="margin-top:4px">Score each label's clips got. A high score on another label means it sounds like the target to the model: label more of it, and check those clips are labeled right.</p>
+    <div style="overflow-x:auto"><table><thead><tr><th>Label</th><th class="num">Clips</th><th class="num">Mean score</th><th class="num">Max</th><th class="num">Above threshold</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${r.confusing.length ? `<p><a id="review-confusing">Review the ${r.confusing.length} clips the model got wrong</a> <span class="small muted">(a wrong label is the usual cause)</span></p>` : `<p class="small muted">The model got every clip right in cross-validation.</p>`}
+    </div>`;
+  $("t-report").querySelectorAll("[data-review]").forEach((a) => a.onclick = () => {
+    const ids = r.clip_scores.filter((c) => c.label === a.dataset.review).map((c) => c.id);
+    openIds(ids, `${pretty(a.dataset.review)}, by ${pretty(target).toLowerCase()} score`);
+  });
+  const rc = $("review-confusing"); if (rc) rc.onclick = () => openIds(r.confusing.map((c) => c.id), "Model got these wrong");
+}
+$("t-target").onchange = loadReport;
+$("t-start").onclick = async () => {
+  try { await post("/api/train", { target: $("t-target").value }); pollJob(); } catch (e) { toast(e.message); }
+};
+async function pollJob() {
+  await refreshStatus();
+  const job = STATUS.job;
+  $("t-log").classList.toggle("hidden", !job.log.length);
+  $("t-log").textContent = job.log.join("\n"); $("t-log").scrollTop = 1e9;
+  $("t-start").disabled = !!job.running;
+  if (job.running) setTimeout(pollJob, 1000); else loadReport();
+}
+
+// ---- import tab ---------------------------------------------------------------------
+async function importFiles(files) {
+  const label = $("i-label").value, split = $("i-split").checked ? 1 : 0;
+  for (const f of files) {
+    const line = document.createElement("div"); line.textContent = `${f.name}: uploading…`; $("i-results").prepend(line);
+    try {
+      const res = await api(`/api/import?name=${encodeURIComponent(f.name)}&label=${encodeURIComponent(label)}&split=${split}`, { method: "POST", body: f });
+      line.innerHTML = `${esc(f.name)}: ${res.saved} clip(s) added. <a>Label them</a>`;
+      line.querySelector("a").onclick = () => openIds(res.clips.map((c) => c.id), `Imported: ${f.name}`);
+    } catch (e) { line.textContent = `${f.name}: ${e.message}`; }
+  }
+  refreshStatus();
+}
+$("pick").onclick = () => $("files").click();
+$("files").onchange = (e) => importFiles([...e.target.files]);
+const drop = $("drop");
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); importFiles([...e.dataTransfer.files]); });
+
+// ---- tabs ---------------------------------------------------------------------------
+function switchTab(name) {
+  document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll("main > section").forEach((s) => s.classList.toggle("hidden", s.id !== `tab-${name}`));
+  if (name !== "label") audio.pause();
+  if (name === "browse") loadBrowse();
+  if (name === "train") pollJob();
+  store.set("tab", name);
+}
+document.querySelectorAll("#tabs button").forEach((b) => b.onclick = () => switchTab(b.dataset.tab));
+
+(async function init() {
+  await refreshStatus();
+  await loadQueue();
+  const tab = store.get("tab", "label"); if (tab !== "label") switchTab(tab);
+})();
+</script>
+</body>
+</html>

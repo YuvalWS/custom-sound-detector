@@ -1,0 +1,223 @@
+"""Tests that need neither the YAMNet model nor a network: synthetic audio and a fake embedder."""
+
+import base64
+import json
+import threading
+import urllib.request
+
+import numpy as np
+import pytest
+
+from sounddetector import SAMPLE_RATE, config
+from sounddetector.app import Ring
+from sounddetector.classifier import TargetModel, load_targets
+from sounddetector.events import Segmenter, segment
+from sounddetector.store import ClipStore
+
+RNG = np.random.default_rng(0)
+
+
+def noise(seconds, level=30):
+    return (RNG.normal(0, level, int(seconds * SAMPLE_RATE))).astype(np.int16)
+
+
+def knock(audio, at, amp=4000, freq=600):
+    """Add a decaying low thud at `at` seconds."""
+    n = int(0.08 * SAMPLE_RATE)
+    t = np.arange(n) / SAMPLE_RATE
+    thud = amp * np.exp(-t * 60) * np.sin(2 * np.pi * freq * t)
+    i = int(at * SAMPLE_RATE)
+    audio[i:i + n] = np.clip(audio[i:i + n] + thud, -32768, 32767).astype(np.int16)
+    return audio
+
+
+def chime(audio, at, seconds=0.6, amp=6000, freq=3500):
+    n = int(seconds * SAMPLE_RATE)
+    t = np.arange(n) / SAMPLE_RATE
+    i = int(at * SAMPLE_RATE)
+    audio[i:i + n] = np.clip(audio[i:i + n] + amp * np.sin(2 * np.pi * freq * t), -32768, 32767).astype(np.int16)
+    return audio
+
+
+class FakeYamNet:
+    """Stands in for YAMNet: the 'embedding' is the share of energy in a few bands, plus noise."""
+
+    sha256 = "f" * 64
+    labels = [f"class_{i}" for i in range(521)]
+
+    def windows(self, samples, hop=0.1):
+        from sounddetector.events import rms_dbfs
+        from sounddetector.yamnet import WINDOW
+
+        step = int(hop * SAMPLE_RATE)
+        starts = list(range(0, max(1, len(samples) - WINDOW + 1), step))
+        embs, levels = [], []
+        for s in starts:
+            x = samples[s:s + WINDOW].astype(np.float64)
+            spec = np.abs(np.fft.rfft(x, 2048)) ** 2
+            bands = np.array([spec[a:b].sum() for a, b in [(0, 128), (128, 256), (256, 512), (512, 1025)]])
+            emb = np.zeros(1024, dtype=np.float32)
+            emb[:4] = bands / (bands.sum() + 1e-9)
+            emb[4:] = RNG.normal(0, 0.01, 1020)
+            embs.append(emb)
+            levels.append(rms_dbfs(x))
+        n = len(starts)
+        return (np.stack(embs), np.zeros((n, 521), np.float32), np.array(levels, np.float32),
+                np.array(starts, np.float32) / SAMPLE_RATE)
+
+    def top_labels(self, scores, k=3):
+        return []
+
+
+def test_segmenter_finds_separate_events():
+    audio = noise(12)
+    knock(audio, 3.0)
+    knock(audio, 3.3)
+    chime(audio, 8.0)
+    events = segment(audio, config.DEFAULTS["collection"])
+    assert len(events) == 2
+    first, second = events
+    assert abs(first.onset / SAMPLE_RATE - 3.0) < 0.1
+    assert abs(second.onset / SAMPLE_RATE - 8.0) < 0.1
+    assert all((e.end - e.start) / SAMPLE_RATE >= 2.0 for e in events)  # min_clip
+    assert first.peak_dbfs > first.background_dbfs + 15
+
+
+def test_segmenter_ignores_quiet_sounds():
+    audio = noise(6)
+    knock(audio, 3.0, amp=40)
+    assert segment(audio, config.DEFAULTS["collection"]) == []
+
+
+def test_segmenter_caps_long_events():
+    audio = noise(14)
+    chime(audio, 2.0, seconds=10)
+    events = segment(audio, config.DEFAULTS["collection"])
+    assert events and max(e.end - e.start for e in events) <= 6 * SAMPLE_RATE
+
+
+def test_streaming_matches_offline():
+    audio = noise(8)
+    knock(audio, 4.0)
+    seg = Segmenter.from_config(config.DEFAULTS["collection"])
+    events = []
+    for i in range(0, len(audio), 1234):  # odd chunk sizes
+        events += seg.feed(audio[i:i + 1234])
+    assert [e.onset for e in events] == [e.onset for e in segment(audio, config.DEFAULTS["collection"])]
+
+
+def test_ring_wraps():
+    ring = Ring(1)
+    data = np.arange(40000, dtype=np.int16)
+    for i in range(0, len(data), 3000):
+        ring.append(data[i:i + 3000])
+    assert np.array_equal(ring.get(ring.pos - 100, ring.pos), data[-100:])
+
+
+def test_store_labels_and_categories(tmp_path):
+    store = ClipStore(tmp_path)
+    clip = store.save(noise(2), {"source": "door"})
+    assert store.get(clip["id"])["label"] is None
+    store.set_label(clip["id"], "stroller")
+    assert "stroller" in store.categories()
+    with pytest.raises(ValueError):
+        store.set_label(clip["id"], "../evil")
+    reopened = ClipStore(tmp_path)
+    assert reopened.get(clip["id"])["label"] == "stroller"
+    assert reopened.stats()["labels"] == {"stroller": 1}
+
+
+def test_store_rate_limit_and_prune_keep_labels(tmp_path):
+    store = ClipStore(tmp_path, max_clips_per_hour=3, max_disk_mb=0)
+    saved = [store.save(noise(2), {"source": "door"}) for _ in range(5)]
+    assert sum(s is not None for s in saved) == 3 and store.dropped == 2
+    labeled = saved[0]["id"]
+    store.set_label(labeled, "knock")
+    store.max_disk_mb = 0.07  # about one 2 s clip
+    store.prune()
+    assert labeled in {c["id"] for c in store.all()}
+    assert len(store.all()) < 3
+
+
+def _labeled_dataset(store):
+    for i in range(8):
+        a = knock(knock(noise(3), 1.0), 1.3 + 0.05 * i)
+        store.set_label(store.save(a, {"source": "door"}, enforce_rate=False)["id"], "knock")
+    for i in range(6):
+        a = chime(noise(3), 1.0, freq=3000 + 100 * i)
+        store.set_label(store.save(a, {"source": "door"}, enforce_rate=False)["id"], "doorbell_chime")
+    for i in range(6):
+        a = chime(noise(3), 1.0, freq=1800 + 50 * i, amp=3000)
+        store.set_label(store.save(a, {"source": "door"}, enforce_rate=False)["id"], "not_knock")
+    store.set_label(store.save(noise(3), {"source": "door"}, enforce_rate=False)["id"], "unsure")
+
+
+def test_training_report_and_model(tmp_path):
+    from sounddetector.train import NotEnoughData, train
+
+    store = ClipStore(tmp_path)
+    with pytest.raises(NotEnoughData):
+        train(store, FakeYamNet(), "knock", tmp_path)
+    _labeled_dataset(store)
+    report = train(store, FakeYamNet(), "knock", tmp_path)
+    assert report["clips"] == 20  # unsure left out
+    assert report["cv"]["recall"] >= 0.8
+    labels = {row["label"] for row in report["categories"]}
+    assert labels == {"knock", "doorbell_chime", "not_knock"}
+    models = load_targets(tmp_path, ["knock"], FakeYamNet.sha256)
+    assert set(models) == {"knock"}
+    # A model trained on other features is refused.
+    assert load_targets(tmp_path, ["knock"], "0" * 64) == {}
+    # Retraining keeps the previous model.
+    train(store, FakeYamNet(), "knock", tmp_path)
+    assert len(list((tmp_path / "models" / "history").glob("knock-*.json"))) == 1
+
+
+def test_model_roundtrip(tmp_path):
+    data = {"target": "knock", "mean": [0.0] * 3, "scale": [1.0] * 3, "coef": [1.0, 0.0, 0.0],
+            "intercept": 0.0, "threshold": 0.5}
+    TargetModel(data).save(tmp_path / "m.json")
+    m = TargetModel.load(tmp_path / "m.json")
+    p = m.predict(np.array([[10.0, 0, 0], [-10.0, 0, 0]]))
+    assert p[0] > 0.99 and p[1] < 0.01
+
+
+def test_web_api(tmp_path):
+    from sounddetector.web import Server
+
+    cfg = config.load(None)
+    cfg["data_dir"] = str(tmp_path)
+    cfg["web"].update({"host": "127.0.0.1", "port": 0, "password": "pw"})
+    store = ClipStore(tmp_path)
+    clip = store.save(noise(2), {"source": "door"})
+    httpd = Server(cfg, store).serve()
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:pw").decode()}
+
+    def call(path, data=None, headers=auth):
+        req = urllib.request.Request(base + path, headers={**headers, "Content-Type": "application/json"},
+                                     data=None if data is None else json.dumps(data).encode())
+        with urllib.request.urlopen(req) as resp:
+            return resp.read()
+
+    with pytest.raises(urllib.error.HTTPError) as err:
+        call("/api/clips", headers={})
+    assert err.value.code == 401
+    listed = json.loads(call("/api/clips?label=unlabeled"))
+    assert listed["total"] == 1
+    call(f"/api/clips/{clip['id']}/label", {"label": "knock"})
+    assert json.loads(call("/api/clips?label=knock"))["total"] == 1
+    assert call(f"/api/clips/{clip['id']}/audio")[:4] == b"RIFF"
+    assert b"Sound detector" in call("/")
+    with pytest.raises(urllib.error.HTTPError) as err:
+        call("/api/clips/..%2F..%2Fetc%2Fpasswd/audio")
+    assert err.value.code == 404
+    httpd.shutdown()
+
+
+def test_redact_hides_stream_login():
+    from sounddetector.audio import redact
+
+    msg = "rtsp://restream:s3cr%40t@10.1.2.3:8554/door: Connection refused"
+    assert "s3cr" not in redact(msg) and "rtsp://***@10.1.2.3:8554/door" in redact(msg)
