@@ -340,3 +340,28 @@ def test_log_buffer_masks_stream_logins():
     line = h.since(0)[-1]
     assert "hunter2" not in line["msg"] and line["name"] == "test" and line["level"] == "WARNING"
     assert h.since(line["seq"]) == []
+
+
+def test_marked_span_limits_training_windows(tmp_path):
+    from sounddetector.features import span_windows, training_windows
+
+    starts = np.arange(0, 4.4, 0.1)  # a 5.36 s clip
+    sel = span_windows(starts, [3.4, 4.2])
+    # Only windows that sit mostly inside the knock, none from the talking at the start.
+    assert starts[sel].min() >= 2.85 and starts[sel].max() <= 3.85
+    assert len(span_windows(starts, [5.3, 5.36])) == 1  # never empty
+    # A louder sound outside the span no longer decides which windows are used.
+    levels = np.full(len(starts), -60.0, np.float32)
+    levels[:10] = -30.0
+    picked = training_windows({"levels": levels, "starts": starts}, [3.4, 4.2])
+    assert len(picked) and set(picked) <= set(sel)
+
+    store = ClipStore(tmp_path)
+    clip = store.save(noise(5), {"source": "door"})
+    assert store.set_span(clip["id"], [4.2, 3.4])["span"] == [3.4, 4.2]
+    assert store.set_span(clip["id"], [-1, 99])["span"] == [0.0, 5.0]
+    with pytest.raises(ValueError):
+        store.set_span(clip["id"], [1, 1.05])
+    with pytest.raises(ValueError):
+        store.set_span(clip["id"], "all")
+    assert store.set_span(clip["id"], None)["span"] is None

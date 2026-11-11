@@ -1,7 +1,8 @@
 """Train a one-vs-rest classifier for one label, and report where it gets confused.
 
 Positives are clips labeled with the target. Negatives are all other labeled clips
-(`not_knock` and every category). `unsure` and unlabeled clips are left out.
+(`not_knock` and every category). `unsure` and unlabeled clips are left out. A clip with a
+marked span (the part the label is about) contributes only the windows inside it.
 
 Evaluation is cross-validated by clip, so windows of one clip never sit on both sides,
 and a clip's score is the max over its windows, the same as the live detector sees it.
@@ -19,7 +20,7 @@ import numpy as np
 
 from .classifier import TargetModel, model_path
 from .config import NOT_KNOCK, UNSURE
-from .features import clip_features, event_windows
+from .features import clip_features, training_windows
 from .store import ClipStore
 
 log = logging.getLogger(__name__)
@@ -113,7 +114,7 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
         except (OSError, ValueError, KeyError) as exc:
             say(f"skipping {meta['id']}: {exc}")
             continue
-        sel = event_windows(feats["levels"])
+        sel = training_windows(feats, meta.get("span"))
         X.append(feats["emb"][sel].astype(np.float32))
         y += [meta["label"] == target] * len(sel)
         groups += [len(used)] * len(sel)
@@ -203,7 +204,7 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
         "summary": {k: report[k] for k in ("clips", "positive_clips", "negative_clips", "cv", "threshold_rule")},
         # Which recordings, with the label each had then: a model stays traceable after a
         # label changes or a clip is deleted.
-        "training_set": [[m["id"], m["label"]] for m in used],
+        "training_set": [[m["id"], m["label"], *([m["span"]] if m.get("span") else [])] for m in used],
     }
     model = TargetModel(data)
     path = model_path(data_dir, target)

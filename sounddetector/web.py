@@ -358,6 +358,8 @@ class Server:
                     data = json.loads(self._body() or b"{}")
                     if len(parts) == 4 and parts[:2] == ["api", "clips"] and parts[3] == "label":
                         self._json(server.store.set_label(parts[2], data.get("label") or None, data.get("note")))
+                    elif len(parts) == 4 and parts[:2] == ["api", "clips"] and parts[3] == "span":
+                        self._json(server.store.set_span(parts[2], data.get("span")))
                     elif len(parts) == 4 and parts[:2] == ["api", "clips"] and parts[3] == "delete":
                         server.store.delete(parts[2])
                         self._json({"ok": True})

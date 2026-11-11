@@ -145,6 +145,19 @@ class ClipStore:
             self.add_category(label)
         return self.update(clip_id, **fields)
 
+    def set_span(self, clip_id: str, span) -> dict:
+        """Mark the part of the clip the label is about, [start, end] in seconds, or None for all of it."""
+        if span is None:
+            return self.update(clip_id, span=None)
+        duration = float(self.get(clip_id)["duration"])
+        try:
+            a, b = sorted(round(min(max(float(v), 0.0), duration), 2) for v in span)
+        except (TypeError, ValueError):
+            raise ValueError("span must be [start, end] in seconds") from None
+        if b - a < 0.1:
+            raise ValueError("span is too short")
+        return self.update(clip_id, span=[a, b])
+
     def delete(self, clip_id: str) -> None:
         with self._lock:
             wav, meta = self._paths(clip_id)
