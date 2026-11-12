@@ -235,6 +235,19 @@ def test_web_api(tmp_path):
     assert json.loads(call("/api/clips?label=all&find=no-such-file.mp4"))["total"] == 0
     assert call(f"/api/clips/{clip['id']}/audio")[:4] == b"RIFF"
     assert b"Sound detector" in call("/")
+    (tmp_path / "settings.yaml").write_text("mqtt: {password: secret}")
+    (tmp_path / "models" / "history").mkdir(parents=True)
+    (tmp_path / "models" / "history" / "knock-old.json").write_text("{}")
+    store.wav_path(clip["id"]).with_name(f"{clip['id']}.embabc.npz").write_bytes(b"x")
+    import io
+    import tarfile
+
+    with tarfile.open(fileobj=io.BytesIO(call("/api/export")), mode="r:gz") as tar:
+        names = tar.getnames()
+        assert json.load(tar.extractfile("backup.json"))["stats"]["labels"] == {"knock": 1}
+    assert {f"clips/{store.wav_path(clip['id']).parent.name}/{clip['id']}.{x}" for x in ("wav", "json")} <= set(names)
+    assert "models/history/knock-old.json" in names
+    assert not any(n.endswith(".npz") or "settings" in n for n in names)
     with pytest.raises(urllib.error.HTTPError) as err:
         call("/api/clips/..%2F..%2Fetc%2Fpasswd/audio")
     assert err.value.code == 404

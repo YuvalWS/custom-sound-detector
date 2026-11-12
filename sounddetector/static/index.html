@@ -36,7 +36,7 @@ main { max-width: 1100px; margin: 0 auto; padding: 16px; }
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .muted { color: var(--muted); } .small { font-size: 13px; }
-select, input[type=text], input[type=number], input[type=password] { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; }
+select, input[type=text], input[type=search], input[type=number], input[type=password] { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; }
 .btn { border: 1px solid var(--border); background: var(--panel); padding: 8px 14px; border-radius: 9px; cursor: pointer; }
 .btn:hover { background: var(--panel-2); }
 .btn:focus-visible, select:focus-visible, input:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
@@ -187,6 +187,7 @@ a { color: var(--accent); cursor: pointer; }
       </select>
       <label class="small row" style="gap:6px"><input type="checkbox" id="b-detected"> Detections only</label>
       <input type="search" id="b-find" placeholder="clip name or video file" style="width:220px" aria-label="Find clips by name or file">
+      <button class="btn" id="b-clear">Clear filters</button>
       <span class="spacer"></span>
       <span class="small muted" id="b-count"></span>
     </div>
@@ -238,6 +239,13 @@ a { color: var(--accent); cursor: pointer; }
     <p class="small muted">Passwords are never shown here or sent to the browser: leave a password field empty to keep it.
       "Test connection" uses what is in the form, and the saved password when its field is empty.
       Changes are stored in <code>settings.yaml</code> in the data directory and override the config file<span id="s-file"></span>.</p>
+  </div>
+  <div class="panel">
+    <h2>Backup</h2>
+    <p class="small muted">One <code>.tar.gz</code> with every clip and its label and mark, the models with their history,
+      the training reports and your categories. Settings are left out, since they hold passwords. To restore, stop the
+      service and extract the archive into the data directory.</p>
+    <a class="btn" id="s-export" href="api/export" download style="display:inline-block;color:inherit;text-decoration:none">Download backup</a>
   </div>
 </section>
 
@@ -437,10 +445,6 @@ async function showClip() {
   } catch (e) { toast(e.message); }
   const next = state.queue[state.i + 1]; if (next) loadAudio(next.id).catch(() => {});
 }
-function removesFromQueue(label) {
-  const { label: ql } = queueParams();
-  return (ql === "unlabeled") || (ql === "not_knock" && label !== "not_knock");
-}
 async function applyLabel(label) {
   const clip = state.current; if (!clip) return;
   try {
@@ -448,11 +452,12 @@ async function applyLabel(label) {
     const accept = label === "knock" ? suggestedSpan(clip) : null;
     if (accept) clip.span = (await post(`/api/clips/${encodeURIComponent(clip.id)}/span`, { span: accept })).span;
     const updated = await post(`/api/clips/${encodeURIComponent(clip.id)}/label`, { label });
-    state.undo.push({ clip: { ...clip }, prev, index: state.i, removed: removesFromQueue(label), acceptedSpan: !!accept });
+    state.undo.push({ clip: { ...clip }, prev, index: state.i, acceptedSpan: !!accept });
     $("undo").disabled = false;
     Object.assign(clip, updated);
     toast(accept ? `${pretty(label)}, marked ${accept[0]}–${accept[1]} s` : `${pretty(label)}`);
-    if (removesFromQueue(label)) state.queue.splice(state.i, 1); else state.i++;
+    // Labeled clips stay in the queue (until it reloads), so Prev can go back to them.
+    state.i++;
     showClip(); refreshStatus();
   } catch (e) { toast(e.message); }
 }
@@ -462,8 +467,7 @@ async function undo() {
   try {
     if (u.acceptedSpan) await post(`/api/clips/${encodeURIComponent(u.clip.id)}/span`, { span: null });
     const restored = await post(`/api/clips/${encodeURIComponent(u.clip.id)}/label`, { label: u.prev });
-    if (u.removed) state.queue.splice(u.index, 0, restored);
-    else { const j = state.queue.findIndex((c) => c.id === u.clip.id); if (j >= 0) state.queue[j] = restored; }
+    const j = state.queue.findIndex((c) => c.id === u.clip.id); if (j >= 0) state.queue[j] = restored;
     state.i = Math.min(u.index, state.queue.length - 1); showClip(); refreshStatus(); toast("Undone");
   } catch (e) { toast(e.message); }
 }
@@ -632,6 +636,10 @@ $("b-rows").addEventListener("click", async (e) => {
 $("b-all").onchange = (e) => { browse.rows.forEach((r) => e.target.checked ? browse.selected.add(r.id) : browse.selected.delete(r.id)); renderBrowse(); };
 ["b-label", "b-sort", "b-detected"].forEach((id) => $(id).onchange = () => loadBrowse());
 $("b-more").onclick = () => loadBrowse(false);
+$("b-clear").onclick = () => {
+  $("b-label").value = "all"; $("b-sort").value = "newest"; $("b-detected").checked = false; $("b-find").value = "";
+  loadBrowse();
+};
 $("b-find").addEventListener("input", () => { clearTimeout(loadBrowse._t); loadBrowse._t = setTimeout(() => loadBrowse(), 250); });
 $("b-find").addEventListener("keydown", (e) => e.stopPropagation());
 $("b-apply").onclick = async () => {

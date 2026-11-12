@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import hmac
+import io
 import json
 import logging
+import tarfile
 import tempfile
 import threading
 import time
@@ -16,7 +18,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import numpy as np
 
-from . import SAMPLE_RATE
+from . import SAMPLE_RATE, __version__
 from .audio import decode_file
 from .config import KNOCK, NOT_KNOCK, UNSURE, valid_label
 from .events import rms_dbfs, segment
@@ -25,6 +27,8 @@ log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).parent / "static"
 MAX_UPLOAD = 200 * 1024 * 1024
+# What a backup holds, under the data directory. settings.yaml is left out: it holds passwords.
+BACKUP_PARTS = ("clips", "models", "reports", "categories.json", "events_per_day.json", "yamnet.tflite")
 
 
 class Jobs:
@@ -111,6 +115,31 @@ class Server:
             "reports": reports,
             "job": self.jobs.state(),
         }
+
+    def export_backup(self, out) -> dict:
+        """Write a .tar.gz of the dataset (clips and labels), models with their history, and reports."""
+        root = Path(self.cfg["data_dir"])
+        files = []
+        for part in BACKUP_PARTS:
+            p = root / part
+            files += sorted(f for f in p.rglob("*") if f.is_file()) if p.is_dir() else [p] if p.is_file() else []
+        # Feature caches (.npz) are rebuilt from the WAVs on the next training: leave them out.
+        files = [f for f in files if f.suffix != ".npz" and ".tmp" not in f.name]
+        manifest = {"created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "version": __version__,
+                    "stats": self.store.stats(), "files": 0,
+                    "restore": "stop the service, extract into the data directory, start it again"}
+        with tarfile.open(fileobj=out, mode="w:gz", compresslevel=6) as tar:
+            for f in files:
+                try:  # a clip can be dropped while we read: skip it
+                    tar.add(f, arcname=f.relative_to(root).as_posix())
+                    manifest["files"] += 1
+                except FileNotFoundError:
+                    pass
+            data = json.dumps(manifest, indent=1).encode()
+            info = tarfile.TarInfo("backup.json")
+            info.size, info.mtime = len(data), int(time.time())
+            tar.addfile(info, io.BytesIO(data))
+        return manifest
 
     def list_clips(self, q: dict) -> dict:
         label = q.get("label", "unlabeled")
@@ -295,6 +324,22 @@ class Server:
                 if self.command != "HEAD":
                     self.wfile.write(body)
 
+            def _send_backup(self):
+                name = time.strftime("sound-detector-backup-%Y%m%d-%H%M.tar.gz")
+                with tempfile.TemporaryFile() as tmp:
+                    server.export_backup(tmp)
+                    size = tmp.tell()
+                    tmp.seek(0)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/gzip")
+                    self.send_header("Content-Length", str(size))
+                    self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    if self.command != "HEAD":
+                        while chunk := tmp.read(1 << 20):
+                            self.wfile.write(chunk)
+
             def _json(self, obj, code: int = 200):
                 self._send(code, json.dumps(obj).encode(), "application/json")
 
@@ -328,6 +373,8 @@ class Server:
                         from .logbuffer import HANDLER
 
                         self._json({"lines": HANDLER.since(int(q.get("after", 0)), int(q.get("limit", 500)))})
+                    elif parts == ["api", "export"]:
+                        self._send_backup()
                     elif parts == ["api", "report"]:
                         target = q.get("target", KNOCK)
                         if not valid_label(target):
