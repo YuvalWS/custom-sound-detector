@@ -190,6 +190,53 @@ def test_training_report_and_model(tmp_path):
     assert (tmp_path / "reports" / "knock.json").exists()
 
 
+def test_training_on_quieter_copies(tmp_path):
+    from sounddetector.train import train
+
+    store = ClipStore(tmp_path)
+    _labeled_dataset(store)
+    report = train(store, FakeYamNet(), "knock", tmp_path, quieter_db=[-8, -16], min_dbfs=-120)
+    assert report["quieter_copies_db"] == [-8, -16]
+    # The copies are cached next to each clip, so the next training is quick.
+    assert len(list(tmp_path.rglob("*.aug*.npz"))) == 20
+    # The "maybe" threshold is never above the alarm threshold, and the model carries both.
+    maybe = report["maybe"]
+    assert maybe["threshold"] <= report["threshold"] and maybe["found"] >= report["cv"]["true_positives"]
+    model = load_targets(tmp_path, ["knock"], FakeYamNet.sha256)["knock"]
+    assert model.maybe_threshold == maybe["threshold"]
+    # Copies too quiet for the collection gate are not learned from.
+    from sounddetector.features import audible, quieter_copies
+
+    clip = store.all()[0]["id"]
+    copies = quieter_copies(store, FakeYamNet(), clip, [-8, -16], [])
+    assert len(copies) == 2 and copies[0]["peak"] - copies[1]["peak"] == pytest.approx(8, abs=0.5)
+    assert audible(copies, copies[0]["peak"] - 1) == copies[:1]
+
+
+def test_each_saved_clip_is_published_with_its_score():
+    from sounddetector.app import App
+
+    class Pub:
+        def __init__(self):
+            self.sent = []
+
+        def publish_clip(self, target, info):
+            self.sent.append((target, info))
+
+    class Model:
+        threshold, maybe_threshold = 0.9, 0.4
+
+    app = object.__new__(App)
+    app.models, app.publisher = {"knock": Model()}, Pub()
+    clip = {"id": "door-20261112-120000-000", "scores": {"knock": 0.55}, "recorded_at": "2026-11-12T12:00:00+02:00",
+            "duration": 3.0, "peak_dbfs": -35.0, "suggested_spans": {"knock": [0.7, 1.5]}}
+    app._publish_clip(clip, set())
+    (target, info), = app.publisher.sent
+    assert target == "knock" and info["score"] == 0.55 and not info["detected"]
+    assert (info["threshold"], info["maybe_threshold"], info["span"]) == (0.9, 0.4, [0.7, 1.5])
+    assert info["audio"] == "api/clips/door-20261112-120000-000/audio"
+
+
 def test_event_counts_give_events_per_day(tmp_path):
     import time as _t
 
@@ -240,6 +287,10 @@ def test_web_api(tmp_path):
     assert json.loads(call(f"/api/clips?label=all&find={clip['id'][-8:].upper()}"))["total"] == 1
     assert json.loads(call("/api/clips?label=all&find=no-such-file.mp4"))["total"] == 0
     assert call(f"/api/clips/{clip['id']}/audio")[:4] == b"RIFF"
+    import shutil
+
+    if shutil.which("ffmpeg"):  # Ogg/Opus, for a Telegram voice note
+        assert call(f"/api/clips/{clip['id']}/audio?format=ogg")[:4] == b"OggS"
     assert b"Sound detector" in call("/")
     (tmp_path / "settings.yaml").write_text("mqtt: {password: secret}")
     (tmp_path / "models" / "history").mkdir(parents=True)

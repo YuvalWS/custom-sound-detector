@@ -709,6 +709,7 @@ async function loadReport() {
     <div class="cards">
       <div class="card"><div class="muted small">Clips used</div><div class="v">${r.clips}</div><div class="small muted">${r.positive_clips} ${esc(pretty(target).toLowerCase())}, ${r.negative_clips} other</div></div>
       <div class="card"><div class="muted small">Threshold</div><div class="v">${r.threshold.toFixed(2)}</div><div class="small muted">${r.sustain ? `held for ${r.sustain.toFixed(1)} s, ` : ""}${rule.budget_per_week !== undefined ? `lowest within ${rule.budget_per_week} false alarm${rule.budget_per_week === 1 ? "" : "s"}/week` : esc(rule.note || "")}</div></div>
+      ${r.maybe ? `<div class="card"><div class="muted small">“Maybe” threshold</div><div class="v">${r.maybe.threshold.toFixed(2)}</div><div class="small muted">finds ${r.maybe.found} of ${r.positive_clips}, ${r.maybe.false_alarms} other sound${r.maybe.false_alarms === 1 ? "" : "s"} above it${r.maybe.rule?.estimated_per_week !== undefined ? `, about ${r.maybe.rule.estimated_per_week}/week` : ""}</div></div>` : ""}
       <div class="card"><div class="muted small">Found (recall)</div><div class="v">${Math.round(cv.recall * 100)}%</div><div class="small muted">${cv.true_positives} found, ${cv.missed} missed</div></div>
       <div class="card"><div class="muted small">False alarms (estimate)</div><div class="v">${rule.estimated_per_week !== undefined ? `≈ ${rule.estimated_per_week}/week` : "?"}</div><div class="small muted">${rule.events_per_day ? `${rule.above_threshold} of ${rule.everyday_sounds} labeled sounds, ~${Math.round(rule.events_per_day)} sounds/day` : "needs a full day of listening"}</div></div>
     </div>
@@ -794,6 +795,7 @@ const FIELDS = [
   ]],
   ["Training", [
     ["training", "false_alarms_per_week", "False alarms per week, at most", "number", "Training picks the threshold that finds the most sounds within this budget."],
+    ["training", "maybe_per_week", "“Maybe” alerts per week, at most", "number", "A second, lower threshold for a quiet heads-up about soft knocks, published to MQTT as maybe_threshold."],
   ]],
   ["Web UI", [
     ["web", "password", "New password for this page", "secret", "User admin. The browser asks again after the restart."],

@@ -44,6 +44,15 @@ def decode_file(path: str) -> np.ndarray:
     return np.frombuffer(proc.stdout, dtype=np.int16).copy()
 
 
+def to_ogg(wav_path) -> bytes:
+    """A WAV file as Ogg/Opus, the format Telegram plays as a voice note."""
+    proc = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-i", str(wav_path),
+                           "-c:a", "libopus", "-b:a", "32k", "-f", "ogg", "-"], capture_output=True, check=False)
+    if proc.returncode != 0 or not proc.stdout:
+        raise ValueError(f"ffmpeg could not encode Ogg: {proc.stderr.decode(errors='replace')[-300:]}")
+    return proc.stdout
+
+
 def write_wav(path, samples: np.ndarray) -> None:
     with wave.open(str(path), "wb") as wf:
         wf.setnchannels(1)

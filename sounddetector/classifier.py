@@ -23,6 +23,8 @@ class TargetModel:
         self.coef = np.asarray(data["coef"], dtype=np.float32)
         self.intercept = float(data["intercept"])
         self.threshold = float(data["threshold"])
+        # The looser "maybe" threshold (the threshold itself for models trained before it).
+        self.maybe_threshold = min(float(data.get("maybe_threshold", self.threshold)), self.threshold)
         # Seconds the score must stay above the threshold (0 for models trained before it).
         self.sustain = float(data.get("sustain", 0.0))
         self.yamnet_sha256: str = data.get("yamnet_sha256", "")
@@ -62,5 +64,6 @@ def load_targets(data_dir, targets, yamnet_sha256: str, thresholds: dict | None 
             continue
         if thresholds and target in thresholds:
             model.threshold = float(thresholds[target])
+            model.maybe_threshold = min(model.maybe_threshold, model.threshold)
         models[target] = model
     return models

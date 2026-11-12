@@ -110,6 +110,13 @@ DEFAULTS: dict = {
         # The threshold is set so that the model would have raised at most this many false
         # alarms per week on the sounds you labeled, scaled to how many sounds a day it hears.
         "false_alarms_per_week": 1.0,
+        # A second, looser threshold for a quiet "maybe a knock" heads-up, set the same way
+        # with this many false alarms a week. Published beside the score (maybe_threshold).
+        "maybe_per_week": 7.0,
+        # Also learn from copies of every clip this many dB quieter, over real background
+        # noise, e.g. [-8, -16], so a soft knock sounds familiar. Off by default: on the
+        # first real dataset it raised soft knocks and footsteps alike, and found no more.
+        "quieter_copies_db": [],
     },
     "categories": DEFAULT_CATEGORIES,
 }
@@ -135,7 +142,7 @@ EDITABLE = {
     "mqtt": ["enabled", "host", "port", "username", "password"],
     "collection": ["enabled", "min_dbfs", "trigger_db", "max_clips_per_hour", "max_disk_mb"],
     "detection": ["targets", "off_delay", "min_hits", "thresholds"],
-    "training": ["false_alarms_per_week"],
+    "training": ["false_alarms_per_week", "maybe_per_week"],
     "web": ["password"],
 }
 SECRETS = {("source", "password"), ("mqtt", "password"), ("web", "password")}

@@ -9,6 +9,10 @@ It scores every window of a held-out clip, as the live detector hears it, and a 
 is the level its window scores stay at for `sustain` seconds (features.sustained_score).
 Training tries a few sustain lengths and keeps the one that finds the most clips within the
 false-alarm budget; the live detector applies the same rule.
+
+Every training clip is also learned from quieter copies of itself, mixed with real background
+noise (features.quieter_copies): a soft knock is a loud knock heard from further away. Only
+the training side of each fold gets them; clips are always scored as they were recorded.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ import numpy as np
 
 from .classifier import TargetModel, model_path
 from .config import NOT_KNOCK, UNSURE
-from .features import SUSTAIN_OPTIONS, clip_features, sustained_score, training_windows
+from .features import SUSTAIN_OPTIONS, audible, clip_features, quieter_copies, sustained_score, training_windows
 from .store import ClipStore
 
 log = logging.getLogger(__name__)
@@ -64,9 +68,11 @@ def _events_per_day(store: ClipStore) -> float | None:
 
 
 FLOOR = 0.5  # where the model itself starts to say "yes"; the budget can only raise it
+MAYBE_FLOOR = 0.2  # the "maybe" threshold may go lower: it is a quiet heads-up, not an alarm
 
 
-def budget_threshold(neg_scores: np.ndarray, events_per_day: float | None, budget_per_week: float) -> dict:
+def budget_threshold(neg_scores: np.ndarray, events_per_day: float | None, budget_per_week: float,
+                     floor: float = FLOOR) -> dict:
     """The lowest threshold (so the most knocks found) whose false alarms fit the weekly budget.
 
     Never below FLOOR: the labeled sounds are not every sound there is, and a low threshold
@@ -79,8 +85,8 @@ def budget_threshold(neg_scores: np.ndarray, events_per_day: float | None, budge
     n = len(neg_scores)
     allowed = int(np.floor(budget_per_week / 7.0 / events_per_day * n)) if events_per_day and n else 0
     ranked = np.sort(neg_scores)[::-1]
-    t = FLOOR if allowed >= n else float(np.ceil(ranked[allowed] * 100 + 1e-6) / 100)  # just above it
-    t = round(min(max(t, FLOOR), 0.99), 2)
+    t = floor if allowed >= n else float(np.ceil(ranked[allowed] * 100 + 1e-6) / 100)  # just above it
+    t = round(min(max(t, floor), 0.99), 2)
     above = int(np.sum(neg_scores >= t))
     rule = {"budget_per_week": budget_per_week, "events_per_day": events_per_day,
             "everyday_sounds": n, "allowed_among_them": allowed, "above_threshold": above,
@@ -94,8 +100,33 @@ def budget_threshold(neg_scores: np.ndarray, events_per_day: float | None, budge
     return {"threshold": t, "rule": rule}
 
 
+def noise_pool(store: ClipStore, clips: list[dict], gate: float | None, size: int = 40) -> list[np.ndarray]:
+    """Real background to mix into quieter copies: the quietest clips labeled not_knock."""
+    limit = (gate if gate is not None else -45.0) + 3
+    quiet = [m for m in clips if m["label"] == NOT_KNOCK and m.get("peak_dbfs") is not None
+             and m["peak_dbfs"] < limit]
+    out = []
+    for m in sorted(quiet, key=lambda m: m["id"])[:size]:
+        try:
+            out.append(store.samples(m["id"]).astype(np.float64))
+        except (OSError, ValueError, KeyError):
+            continue
+    return out
+
+
+def options(cfg: dict) -> dict:
+    """train() keyword arguments from the config."""
+    t = cfg["training"]
+    return {"C": float(t["C"]), "min_pos": int(t["min_positive_clips"]), "min_neg": int(t["min_negative_clips"]),
+            "false_alarms_per_week": float(t["false_alarms_per_week"]),
+            "maybe_per_week": float(t["maybe_per_week"]),
+            "quieter_db": [float(g) for g in t.get("quieter_copies_db") or []],
+            "min_dbfs": float(cfg["collection"]["min_dbfs"])}
+
+
 def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_pos: int = 5,
-          min_neg: int = 10, false_alarms_per_week: float = 1.0, progress=None) -> dict:
+          min_neg: int = 10, false_alarms_per_week: float = 1.0, maybe_per_week: float = 7.0,
+          quieter_db=(), min_dbfs: float | None = None, progress=None) -> dict:
     """Train, save <data_dir>/models/<target>.json and return the report (also saved)."""
     from sklearn.model_selection import StratifiedGroupKFold
 
@@ -110,6 +141,8 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
     say(f"computing features for {len(clips)} labeled clips")
     X, y, groups = [], [], []
     used, full = [], []  # full: every window of each clip (embeddings, starts), for scoring
+    extra: list = []  # the training windows of each clip's quieter copies
+    noise = noise_pool(store, clips, min_dbfs) if quieter_db else []
     t0 = time.time()
     for i, meta in enumerate(clips):
         try:
@@ -117,6 +150,13 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
         except (OSError, ValueError, KeyError) as exc:
             say(f"skipping {meta['id']}: {exc}")
             continue
+        copies = []
+        if quieter_db:
+            try:
+                copies = audible(quieter_copies(store, yamnet, meta["id"], quieter_db, noise), min_dbfs)
+            except (OSError, ValueError, KeyError) as exc:
+                say(f"no quieter copies of {meta['id']}: {exc}")
+        extra.append([c["emb"][training_windows(c, meta.get("span"))].astype(np.float32) for c in copies])
         sel = training_windows(feats, meta.get("span"))
         X.append(feats["emb"][sel].astype(np.float32))
         y += [meta["label"] == target] * len(sel)
@@ -128,16 +168,25 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
     X = np.concatenate(X)
     y = np.array(y, dtype=bool)
     groups = np.array(groups)
-    say(f"features ready in {time.time() - t0:.0f}s: {len(X)} windows from {len(used)} clips")
-
     truth = np.array([m["label"] == target for m in used])
+    n_extra = sum(len(e) for c in extra for e in c)
+    say(f"features ready in {time.time() - t0:.0f}s: {len(X)} windows from {len(used)} clips"
+        + (f", {n_extra} more from quieter copies" if quieter_db else ""))
+
+    def fit(clip_ids) -> tuple:
+        """Fit on these clips' windows plus their quieter copies."""
+        mask = np.isin(groups, clip_ids)
+        parts = [X[mask]] + [e for g in clip_ids for e in extra[g]]
+        labels = [y[mask]] + [np.full(len(e), truth[g]) for g in clip_ids for e in extra[g]]
+        return _fit(np.concatenate(parts), np.concatenate(labels), C)
+
     n_splits = int(min(5, truth.sum(), (~truth).sum()))
     oof_probs: list = [np.zeros(1)] * len(used)  # held-out window scores of each clip
     if n_splits >= 2:
         say(f"cross-validating ({n_splits} folds)")
         cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=0)
         for tr, te in cv.split(X, y, groups):
-            params = _fit(X[tr], y[tr], C)
+            params = fit(np.unique(groups[tr]))
             for g in np.unique(groups[te]):
                 oof_probs[g] = _predict(params, full[g][0])
     # Every labeled non-target clip counts as an everyday sound, imported ones too: an imported
@@ -158,15 +207,20 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
             if best is None or key > best[0]:
                 best = (key, sustain, scores, c)
         _, sustain, oof, choice = best
+        maybe = budget_threshold(oof[~truth], epd, float(maybe_per_week), floor=MAYBE_FLOOR)
         say("sustain: " + ", ".join(f"{o['sustain']:.1f}s finds {o['found']}, {o['false_alarms']} false"
                                     for o in sustain_options) + f"; using {sustain:.1f}s")
     else:
         sustain, oof = 0.0, np.zeros(len(used))
         choice = {"threshold": 0.5, "rule": {"note": "too few clips to cross-validate"}}
+        maybe = {"threshold": 0.5, "rule": choice["rule"]}
     threshold = choice["threshold"]
+    maybe_threshold = min(maybe["threshold"], threshold)
+    maybe_found = int(np.sum(oof[truth] >= maybe_threshold))
+    maybe_false = int(np.sum(oof[~truth] >= maybe_threshold))
 
     say("training the final model on all clips")
-    mean, scale, coef, b = _fit(X, y, C)
+    mean, scale, coef, b = fit(np.arange(len(used)))
 
     pred = oof >= threshold
     tp, fp, fn = int(np.sum(pred & truth)), int(np.sum(pred & ~truth)), int(np.sum(~pred & truth))
@@ -205,6 +259,10 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
         "sustain": sustain,
         "sustain_options": sustain_options,
         "threshold_rule": choice["rule"],
+        # A looser "maybe" threshold, for a quiet heads-up: soft knocks score between the two.
+        "maybe": {"threshold": maybe_threshold, "found": maybe_found, "false_alarms": maybe_false,
+                  "rule": maybe["rule"]},
+        "quieter_copies_db": list(quieter_db),
         "cv": {"true_positives": tp, "false_positives": fp, "missed": fn,
                "precision": round(tp / max(1, tp + fp), 3), "recall": round(tp / max(1, tp + fn), 3)},
         "categories": categories,
@@ -216,6 +274,7 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
         "target": target,
         "trained_at": trained_at,
         "threshold": threshold,
+        "maybe_threshold": maybe_threshold,
         "sustain": sustain,
         "mean": mean.round(6).tolist(),
         "scale": scale.round(6).tolist(),
@@ -247,6 +306,9 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
         "false alarm rate unknown until a full day of listening is counted"
     say(f"saved {path}: threshold {threshold} held for {sustain:.1f}s, finds {round(100 * report['cv']['recall'])}% of "
         f"{target} clips, {fa}")
+    mrule = maybe["rule"]
+    say(f"maybe threshold {maybe_threshold}: finds {maybe_found} of {int(truth.sum())}, {maybe_false} labeled sounds "
+        f"above it" + (f", about {mrule['estimated_per_week']} a week" if "estimated_per_week" in mrule else ""))
     return report
 
 

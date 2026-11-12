@@ -133,6 +133,7 @@ class App:
         m = self.models.get(target)
         st = self.states.get(target)
         return {"score": round(st.last_score, 3) if st else 0.0, "threshold": m.threshold if m else None,
+                "maybe_threshold": m.maybe_threshold if m else None,
                 "model_trained_at": m.trained_at if m else None, **extra}
 
     # ---- audio loop --------------------------------------------------------------------
@@ -270,8 +271,30 @@ class App:
                     if target in self.models:
                         self.publisher.publish_state(target, self.states[target].on,
                                                      self._attrs(target, clip_id=saved["id"]))
+                self._publish_clip(saved, {t for _, t, _ in hits})
         except Exception:  # a failed save must never stop the audio loop
             log.exception("could not save clip")
+
+    def _publish_clip(self, clip: dict, detected: set) -> None:
+        """Every saved clip, with each model's score: Home Assistant picks its own thresholds."""
+        for target, m in self.models.items():
+            score = (clip.get("scores") or {}).get(target)
+            if score is None:
+                continue
+            self.publisher.publish_clip(target, {
+                "clip_id": clip["id"],
+                "score": score,
+                "threshold": m.threshold,
+                "maybe_threshold": m.maybe_threshold,
+                # Whether the live detector turned the sensor on for this clip.
+                "detected": target in detected,
+                "recorded_at": clip.get("recorded_at"),
+                "duration": clip.get("duration"),
+                "peak_dbfs": clip.get("peak_dbfs"),
+                "span": (clip.get("suggested_spans") or {}).get(target),
+                # Relative to the web UI's address; add ?format=ogg for a Telegram voice note.
+                "audio": f"api/clips/{clip['id']}/audio",
+            })
 
     def status(self) -> dict:
         seg = self.segmenter
@@ -284,7 +307,7 @@ class App:
             "collecting": bool(self.cfg["collection"]["enabled"]),
             "events_seen": self.events_seen,
             "uptime_s": int(time.time() - self.started),
-            "models": {t: {"threshold": m.threshold, "sustain": m.sustain, "trained_at": m.trained_at,
-                           "on": self.states[t].on} for t, m in self.models.items()},
+            "models": {t: {"threshold": m.threshold, "maybe_threshold": m.maybe_threshold, "sustain": m.sustain,
+                           "trained_at": m.trained_at, "on": self.states[t].on} for t, m in self.models.items()},
             "yamnet": Path(self.yamnet.path).name,
         }

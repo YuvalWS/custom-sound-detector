@@ -174,6 +174,15 @@ A good first dataset:
   one click or clack scores high only briefly. Training tries each sustain time and keeps
   the one that finds the most knocks within the false-alarm budget; the live detector then
   needs the score above the threshold for that long before it reports a knock.
+- **Soft knocks.** Training also picks a lower `maybe_threshold`
+  (`training.maybe_per_week`, 7 a week), for a quiet heads-up about knocks it is less sure
+  of. Optionally, `training.quieter_copies_db: [-8, -16]` also learns from copies of every
+  clip that much quieter, mixed with real background from your quietest `not_knock` clips:
+  a soft knock is a loud one heard from further away. Copies too quiet to pass
+  `collection.min_dbfs` are left out, every class gets copies (with knocks alone the model
+  learns that quiet means knock), and evaluation always scores the clips as recorded. It is
+  off by default: on 41 knocks and 577 other sounds it raised soft knocks and footsteps
+  alike, and found 31 knocks instead of 32. The first training with it takes minutes.
 - A clip with two sounds (a beep, then a knock) can be split in the Label tab: click
   between them and press S, then label each part. Undo puts the clip back.
 - **The threshold is set by false alarms, not by precision.** Precision on your labels depends
@@ -196,23 +205,95 @@ YAMNet file means retraining.
 
 ## Home Assistant
 
-With MQTT discovery on (the default), every trained target appears as a binary sensor:
-`binary_sensor.sound_detector_<source>_<target>`, with device class `sound`. The state is
-`ON` from the first hit until `detection.off_delay` seconds without one. Attributes: `score`,
-`threshold`, `model_trained_at`, and `clip_id` of the clip that triggered it.
+With MQTT discovery on (the default), every trained target appears as two entities:
+
+- `binary_sensor.sound_detector_<source>_<target>` (device class `sound`): `ON` from the
+  first live hit until `detection.off_delay` seconds without one. Attributes: `score`,
+  `threshold`, `maybe_threshold`, `model_trained_at`, and `clip_id` of the clip that
+  triggered it. This is the fastest signal, under a second after the knock.
+- `sensor.sound_detector_<source>_<target>_score`: the model's score for every clip the
+  detector saves, a second or two after the sound ends. Its attributes are the clip message
+  below, so an automation can alert at two levels and fetch the recording.
+
+Each saved clip is published on `sound_detector/<source>/<target>/clip`:
+
+```json
+{"clip_id": "front_door_audio-20261112-145338-277", "score": 0.981,
+ "threshold": 0.95, "maybe_threshold": 0.42, "detected": true,
+ "recorded_at": "2026-11-12T14:53:38.277+02:00", "duration": 2.43, "peak_dbfs": -30.1,
+ "span": [0.22, 1.14], "audio": "api/clips/front_door_audio-20261112-145338-277/audio"}
+```
+
+- `threshold` is the alarm threshold training chose, within `training.false_alarms_per_week`.
+- `maybe_threshold` is a lower one, within `training.maybe_per_week` (7 by default): soft
+  or unusual knocks often land between the two. Use it for a quiet heads-up, not an alarm.
+  Both come with every message, so a retrain moves them without touching Home Assistant.
+- `audio` is relative to the web UI (`http://<host>:8080/`) and needs its login. Add
+  `?format=ogg` for Ogg/Opus, which Telegram plays as a voice note.
+
+The audio is fetched over HTTP rather than sent over MQTT: Home Assistant cannot attach an
+MQTT payload to a notification, but its Telegram and notify actions can fetch a URL with a
+login.
+
+A knock alert on Telegram with the recording and two buttons that label the clip, so the
+model keeps learning once it is live. As a Home Assistant package
+(`packages/sound_detector.yaml`); put the web UI's password in `secrets.yaml` as
+`sound_detector_password`, and replace `sound-detector.lan` with the detector's address:
 
 ```yaml
+rest_command:
+  sound_detector_label:
+    url: "http://sound-detector.lan:8080/api/clips/{{ clip_id }}/label"
+    method: POST
+    username: admin
+    password: !secret sound_detector_password
+    content_type: application/json
+    payload: '{"label": "{{ label }}"}'
+
 automation:
-  - alias: Knock at the door
+  - alias: "Sound detector: knock with the recording"
+    mode: queued
     triggers:
-      - trigger: state
-        entity_id: binary_sensor.sound_detector_front_door_knock
-        to: "on"
+      - trigger: mqtt
+        topic: sound_detector/front_door_audio/knock/clip
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.payload_json.score >= trigger.payload_json.maybe_threshold }}"
     actions:
-      - action: notify.notify
+      - variables:
+          clip: "{{ trigger.payload_json }}"
+          sure: "{{ clip.score >= clip.threshold }}"
+      - action: telegram_bot.send_voice
         data:
-          message: Someone is knocking at the door.
+          url: "http://sound-detector.lan:8080/{{ clip.audio }}?format=ogg"
+          authentication: basic
+          username: admin
+          password: !secret sound_detector_password
+          caption: "{{ 'Knock at the door' if sure else 'Maybe a knock' }} ({{ clip.score }})"
+          disable_notification: "{{ not sure }}"
+          inline_keyboard:
+            - "Knock:/clip {{ clip.clip_id }} knock, Not a knock:/clip {{ clip.clip_id }} not_knock"
+
+  - alias: "Sound detector: label from Telegram"
+    triggers:
+      - trigger: event
+        event_type: telegram_callback
+        event_data:
+          command: /clip
+    actions:
+      - action: rest_command.sound_detector_label
+        data:
+          clip_id: "{{ trigger.event.data.args[0] }}"
+          label: "{{ trigger.event.data.args[1] }}"
+      - action: telegram_bot.answer_callback_query
+        data:
+          callback_query_id: "{{ trigger.event.data.id }}"
+          message: "Labeled {{ trigger.event.data.args[1] }}"
 ```
+
+Telegram limits a button's data to 64 bytes, which fits a clip id and a label. Labels set
+from Telegram are used at the next training, like labels set in the web UI. For the strict
+alert alone, compare the score with `threshold` instead of `maybe_threshold`.
 
 Raw topics, under `topic_prefix` (default `sound_detector`):
 
@@ -220,6 +301,7 @@ Raw topics, under `topic_prefix` (default `sound_detector`):
 |---|---|
 | `sound_detector/<source>/<target>` | `ON` / `OFF` |
 | `sound_detector/<source>/<target>/attributes` | JSON, retained |
+| `sound_detector/<source>/<target>/clip` | JSON, one message per saved clip |
 | `sound_detector/<source>/availability` | `online` / `offline`, retained |
 
 ## Command line

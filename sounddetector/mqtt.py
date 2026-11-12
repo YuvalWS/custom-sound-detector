@@ -1,4 +1,9 @@
-"""MQTT output: one ON/OFF topic per target, with Home Assistant discovery."""
+"""MQTT output, with Home Assistant discovery.
+
+Per target: `<prefix>/<source>/<target>` is ON/OFF (a binary sensor), with attributes on
+`.../attributes`; `.../clip` gets one JSON message per saved clip with the model's score for
+it (a "score" sensor), so Home Assistant can alert at either threshold and fetch the audio.
+"""
 
 from __future__ import annotations
 
@@ -60,26 +65,45 @@ class Publisher:
         if not self.cfg.get("discovery"):
             return
         uid = f"sound_detector_{self.source}_{target}"
-        topic = f"{self.cfg['discovery_prefix']}/binary_sensor/{uid}/config"
-        if remove:
-            self.client.publish(topic, "", retain=True)
-            return
-        payload = {
-            "name": target.replace("_", " ").capitalize(),
-            "unique_id": uid,
-            "object_id": uid,
-            "device_class": "sound",
-            "state_topic": f"{self.base}/{target}",
-            "json_attributes_topic": f"{self.base}/{target}/attributes",
-            "availability_topic": self.availability,
-            "device": {
-                "identifiers": [f"sound_detector_{self.source}"],
-                "name": f"Sound detector {self.source.replace('_', ' ')}",
-                "manufacturer": "custom-sound-detector",
-                "sw_version": self.version,
+        name = target.replace("_", " ").capitalize()
+        device = {
+            "identifiers": [f"sound_detector_{self.source}"],
+            "name": f"Sound detector {self.source.replace('_', ' ')}",
+            "manufacturer": "custom-sound-detector",
+            "sw_version": self.version,
+        }
+        entities = {
+            f"binary_sensor/{uid}": {
+                "name": name,
+                "unique_id": uid,
+                "object_id": uid,
+                "device_class": "sound",
+                "state_topic": f"{self.base}/{target}",
+                "json_attributes_topic": f"{self.base}/{target}/attributes",
+            },
+            f"sensor/{uid}_score": {
+                "name": f"{name} score",
+                "unique_id": f"{uid}_score",
+                "object_id": f"{uid}_score",
+                "icon": "mdi:waveform",
+                "state_class": "measurement",
+                "state_topic": f"{self.base}/{target}/clip",
+                "value_template": "{{ value_json.score }}",
+                "json_attributes_topic": f"{self.base}/{target}/clip",
+                "force_update": True,
             },
         }
-        self.client.publish(topic, json.dumps(payload), retain=True)
+        for path, payload in entities.items():
+            topic = f"{self.cfg['discovery_prefix']}/{path}/config"
+            if remove:
+                self.client.publish(topic, "", retain=True)
+            else:
+                payload.update({"availability_topic": self.availability, "device": device})
+                self.client.publish(topic, json.dumps(payload), retain=True)
+
+    def publish_clip(self, target: str, info: dict) -> None:
+        """One saved clip and the target model's score for it (not retained: an event)."""
+        self.client.publish(f"{self.base}/{target}/clip", json.dumps(info))
 
     def publish_state(self, target: str, on: bool, attributes: dict | None = None) -> None:
         self.client.publish(f"{self.base}/{target}", "ON" if on else "OFF")

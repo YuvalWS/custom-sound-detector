@@ -51,15 +51,12 @@ def cmd_ui(cfg, args):
 
 def cmd_train(cfg, args):
     from .classifier import load_targets
-    from .train import rescore, train
+    from .train import options, rescore, train
     from .yamnet import YamNet
 
     yam = YamNet(cfg["yamnet_model"])
     store = _store(cfg)
-    t = cfg["training"]
-    report = train(store, yam, args.target, cfg["data_dir"], C=float(t["C"]),
-                   min_pos=int(t["min_positive_clips"]), min_neg=int(t["min_negative_clips"]),
-                   false_alarms_per_week=float(t["false_alarms_per_week"]))
+    report = train(store, yam, args.target, cfg["data_dir"], **options(cfg))
     print(f"\n{'label':<16}{'clips':>6}{'mean':>7}{'max':>7}{'above':>7}")
     for row in report["categories"]:
         print(f"{row['label']:<16}{row['clips']:>6}{row['mean_score']:>7.2f}{row['max_score']:>7.2f}"

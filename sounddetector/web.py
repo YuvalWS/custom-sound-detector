@@ -286,14 +286,11 @@ class Server:
 
         def job(say):
             from .classifier import load_targets
-            from .train import rescore, train
+            from .train import options, rescore, train
 
-            t = self.cfg["training"]
             with self._yamnet_lock:
                 yam = self.yamnet()
-                train(self.store, yam, target, self.cfg["data_dir"], C=float(t["C"]),
-                      min_pos=int(t["min_positive_clips"]), min_neg=int(t["min_negative_clips"]),
-                      false_alarms_per_week=float(t["false_alarms_per_week"]), progress=say)
+                train(self.store, yam, target, self.cfg["data_dir"], progress=say, **options(self.cfg))
                 det = self.cfg["detection"]
                 targets = sorted(set(det["targets"]) | {target})
                 models = load_targets(self.cfg["data_dir"], targets, yam.sha256, det.get("thresholds"))
@@ -386,7 +383,13 @@ class Server:
                         self._json(server.store.get(parts[2]))
                     elif len(parts) == 4 and parts[:2] == ["api", "clips"] and parts[3] == "audio":
                         wav = server.store.wav_path(parts[2])
-                        self._send(200, wav.read_bytes(), "audio/wav")
+                        if q.get("format") == "ogg":
+                            from .audio import to_ogg
+
+                            self._send(200, to_ogg(wav), "audio/ogg",
+                                       {"Content-Disposition": f'inline; filename="{parts[2]}.ogg"'})
+                        else:
+                            self._send(200, wav.read_bytes(), "audio/wav")
                     elif parts == ["api", "settings"]:
                         self._json(server.settings())
                     elif parts == ["api", "logs"]:

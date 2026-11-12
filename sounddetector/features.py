@@ -30,6 +30,66 @@ def clip_features(store: ClipStore, yamnet: YamNet, clip_id: str) -> dict:
     return feats
 
 
+def peak_dbfs(samples: np.ndarray) -> float:
+    """The loudest 50 ms level, as the segmenter measures it."""
+    from .events import FRAME, SHORT, dbfs
+
+    x = np.asarray(samples, dtype=np.float64)
+    n = len(x) // FRAME
+    if n == 0:
+        return -120.0
+    energy = np.mean(x[: n * FRAME].reshape(n, FRAME) ** 2, axis=1)
+    if n >= SHORT:
+        energy = np.convolve(energy, np.ones(SHORT) / SHORT, mode="valid")
+    return dbfs(float(energy.max()))
+
+
+def quieter_copies(store: ClipStore, yamnet: YamNet, clip_id: str, gains, noise: list[np.ndarray]) -> list[dict]:
+    """Features of the clip played `gains` dB quieter, over real background noise (cached).
+
+    A soft knock is a loud knock heard from further away: quieter, with the same background.
+    Each copy keeps its peak level, so the ones the detector could not hear can be dropped.
+    """
+    import zlib
+
+    gains = [float(g) for g in gains]
+    wav = store.wav_path(clip_id)
+    cache = wav.with_name(f"{clip_id}.aug{yamnet.sha256[:8]}.npz")
+    if cache.exists():
+        try:
+            with np.load(cache) as data:
+                if list(data["asked"]) == gains:
+                    return [{"emb": data[f"emb{k}"], "levels": data[f"levels{k}"], "starts": data[f"starts{k}"],
+                             "peak": float(data[f"peak{k}"])} for k in range(int(data["n"]))]
+        except (OSError, ValueError, KeyError):
+            pass
+        cache.unlink(missing_ok=True)
+    x = store.samples(clip_id).astype(np.float64)
+    seed = zlib.crc32(clip_id.encode())
+    out = []
+    for k, gain in enumerate(gains):
+        y = x * 10 ** (gain / 20)
+        if noise:
+            n = noise[(seed + k) % len(noise)]
+            y = y + np.resize(n, len(y))
+        y = np.clip(y, -32768, 32767).astype(np.int16)
+        emb, _, levels, starts = yamnet.windows(y, hop=HOP)
+        out.append({"emb": emb.astype(np.float16), "levels": levels, "starts": starts, "peak": peak_dbfs(y)})
+    arrays = {"asked": np.array(gains), "n": np.array(len(out))}
+    for k, f in enumerate(out):
+        arrays.update({f"emb{k}": f["emb"], f"levels{k}": f["levels"], f"starts{k}": f["starts"],
+                       f"peak{k}": np.array(f["peak"])})
+    tmp = cache.with_name(cache.name + ".tmp.npz")
+    np.savez(tmp, **arrays)
+    tmp.replace(cache)
+    return out
+
+
+def audible(copies: list[dict], min_dbfs: float | None) -> list[dict]:
+    """The copies loud enough to start a clip (peak at or above the collection gate)."""
+    return [c for c in copies if min_dbfs is None or c["peak"] >= min_dbfs]
+
+
 def event_windows(levels: np.ndarray, within_db: float = 10.0) -> np.ndarray:
     """Indices of the windows that hold the sound itself: within `within_db` of the loudest."""
     return np.flatnonzero(levels >= levels.max() - within_db)
