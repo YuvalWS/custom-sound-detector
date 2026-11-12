@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import numpy as np
 
 from . import SAMPLE_RATE, __version__
+from .apikeys import SCOPES, ApiKeys, allowed
 from .audio import decode_file
 from .config import KNOCK, NOT_KNOCK, UNSURE, valid_label
 from .events import rms_dbfs, segment
@@ -78,6 +79,7 @@ class Server:
         self.store = store
         self.app = app  # None when the UI runs on its own (`sound-detector ui`)
         self.jobs = Jobs()
+        self.keys = ApiKeys(cfg["data_dir"])
         self._yamnet = None
         self._yamnet_lock = threading.Lock()
 
@@ -412,11 +414,21 @@ class Server:
                 log.debug("web: " + fmt, *args)
 
             def _authorized(self) -> bool:
-                if expected is None:
-                    return True
+                """The UI password (basic auth), or an API key allowed to make this request."""
                 got = self.headers.get("Authorization", "")
-                if hmac.compare_digest(got.encode(), expected.encode()):
+                key = got[7:].strip() if got[:7].lower() == "bearer " else self.headers.get("X-API-Key", "").strip()
+                if key:
+                    rec = server.keys.check(key)
+                    if rec is not None:
+                        parts = [unquote(p) for p in urlparse(self.path).path.strip("/").split("/") if p]
+                        if allowed(rec["scope"], self.command, parts):
+                            return True
+                        self.close_connection = True  # the request body is left unread
+                        self._json({"error": f"this API key ({rec['scope']}) may not do that"}, 403)
+                        return False
+                elif expected is None or hmac.compare_digest(got.encode(), expected.encode()):
                     return True
+                self.close_connection = True
                 self.send_response(401)
                 self.send_header("WWW-Authenticate", 'Basic realm="sound-detector"')
                 self.send_header("Content-Length", "0")
@@ -491,6 +503,8 @@ class Server:
                         self._json({"lines": HANDLER.since(int(q.get("after", 0)), int(q.get("limit", 500)))})
                     elif parts == ["api", "update"]:
                         self._json(server.software())
+                    elif parts == ["api", "keys"]:
+                        self._json({"keys": server.keys.list(), "scopes": SCOPES})
                     elif parts == ["api", "export"]:
                         self._send_backup()
                     elif parts == ["api", "report"]:
@@ -547,6 +561,14 @@ class Server:
                         self._json(server.run_test(parts[2], data))
                     elif parts == ["api", "update"]:
                         self._json(server.request_update())
+                    elif parts == ["api", "keys"]:
+                        rec, key = server.keys.create(str(data.get("name", "")), str(data.get("scope", "")))
+                        log.info("API key %s (%s) created", rec["name"], rec["scope"])
+                        self._json({"key": key, **rec})
+                    elif len(parts) == 4 and parts[:2] == ["api", "keys"] and parts[3] == "revoke":
+                        server.keys.revoke(parts[2])
+                        log.info("API key %s revoked", parts[2])
+                        self._json({"ok": True})
                     elif parts == ["api", "train"]:
                         started = server.start_training(data.get("target", KNOCK))
                         self._json({"started": started, "job": server.jobs.state()}, 200 if started else 409)

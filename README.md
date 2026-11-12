@@ -251,16 +251,17 @@ login.
 
 A knock alert on Telegram with the recording and two buttons that label the clip, so the
 model keeps learning once it is live. As a Home Assistant package
-(`packages/sound_detector.yaml`); put the web UI's password in `secrets.yaml` as
-`sound_detector_password`, and replace `sound-detector.lan` with the detector's address:
+(`packages/sound_detector.yaml`). Create a **labeling** API key in Settings → API keys,
+put it in `secrets.yaml` as `sound_detector_api_key`, and replace `sound-detector.lan` with
+the detector's address:
 
 ```yaml
 rest_command:
   sound_detector_label:
     url: "http://sound-detector.lan:8080/api/clips/{{ clip_id }}/label"
     method: POST
-    username: admin
-    password: !secret sound_detector_password
+    headers:
+      X-API-Key: !secret sound_detector_api_key
     content_type: application/json
     payload: '{"label": "{{ label }}"}'
 
@@ -280,9 +281,8 @@ automation:
       - action: telegram_bot.send_voice
         data:
           url: "http://sound-detector.lan:8080/{{ clip.audio }}?format=ogg"
-          authentication: basic
-          username: admin
-          password: !secret sound_detector_password
+          authentication: bearer_token
+          password: !secret sound_detector_api_key
           caption: "{{ 'Knock at the door' if sure else 'Maybe a knock' }} ({{ clip.score }})"
           disable_notification: "{{ not sure }}"
           inline_keyboard:
@@ -351,6 +351,20 @@ The stream, MQTT and web UI passwords are stored in plain text in the config fil
 camera passwords in its `.env`. They are never sent to the browser (the Settings tab only
 shows whether one is set), never written to the log (a login in an ffmpeg error is masked),
 and never part of the repository. The Proxmox helper's saved defaults leave them out.
+
+### API keys
+
+For programs, create a key in **Settings → API keys** instead of handing out the UI
+password. Send it as `Authorization: Bearer <key>` or `X-API-Key: <key>`. Two scopes:
+
+- **labeling**: read clips, their audio and the reports, and set labels and marks. What a
+  Home Assistant alert needs.
+- **full**: everything the UI can do, except managing keys.
+
+Creating, listing and revoking keys needs the UI password, so a leaked key can't make more
+keys or hide itself. A key is shown once; only its SHA-256 is kept, in `api_keys.json` in the
+data directory (readable only by the service user, and left out of backups). The list shows
+when each key was last used. Revoking a key takes effect at once.
 
 ## Privacy and backups
 

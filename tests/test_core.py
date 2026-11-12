@@ -321,6 +321,27 @@ def test_web_api(tmp_path):
     if shutil.which("ffmpeg"):  # Ogg/Opus, for a Telegram voice note
         assert call(f"/api/clips/{clip['id']}/audio?format=ogg")[:4] == b"OggS"
     assert b"Sound detector" in call("/")
+    # API keys: made with the password, shown once, stored hashed.
+    made = json.loads(call("/api/keys", {"name": "Home Assistant", "scope": "labeling"}))
+    key, full = made["key"], json.loads(call("/api/keys", {"name": "Claude", "scope": "full"}))["key"]
+    assert key not in (tmp_path / "api_keys.json").read_text()
+    assert [k["name"] for k in json.loads(call("/api/keys"))["keys"]] == ["Home Assistant", "Claude"]
+    bearer = {"Authorization": f"Bearer {key}"}
+    assert call(f"/api/clips/{clip['id']}/audio", headers=bearer)[:4] == b"RIFF"
+    labeled = call(f"/api/clips/{clip['id']}/label", {"label": "knock"}, headers={"X-API-Key": key})
+    assert json.loads(labeled)["label"] == "knock"
+    for path, data in (("/api/settings", None), ("/api/update", {}), ("/api/keys", None)):
+        with pytest.raises(urllib.error.HTTPError) as err:
+            call(path, data, headers=bearer)
+        assert err.value.code == 403
+    assert json.loads(call("/api/settings", headers={"Authorization": f"Bearer {full}"}))
+    with pytest.raises(urllib.error.HTTPError) as err:  # not even a full key manages keys
+        call("/api/keys", {"name": "x", "scope": "full"}, headers={"Authorization": f"Bearer {full}"})
+    assert err.value.code == 403
+    call(f"/api/keys/{made['id']}/revoke", {})
+    with pytest.raises(urllib.error.HTTPError) as err:
+        call("/api/clips", headers=bearer)
+    assert err.value.code == 401
     # Not installed by install.sh: the UI can show the version, but not update.
     sw = json.loads(call("/api/update"))
     assert sw["can_update"] is False and sw["installed"] is None

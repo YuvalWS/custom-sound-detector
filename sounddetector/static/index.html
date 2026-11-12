@@ -257,6 +257,20 @@ a { color: var(--accent); cursor: pointer; }
     <a class="btn" id="s-export" href="api/export" download style="display:inline-block;color:inherit;text-decoration:none">Download backup</a>
   </div>
   <div class="panel">
+    <h2>API keys</h2>
+    <p class="small muted">For programs such as Home Assistant: send <code>Authorization: Bearer &lt;key&gt;</code>.
+      <b>Labeling</b> keys can read clips, audio and reports and set labels and marks; <b>full</b> keys can do everything
+      except manage keys, which needs this page's password. A key is shown once, when you create it.</p>
+    <table><thead><tr><th>Name</th><th>Scope</th><th>Key</th><th>Created</th><th>Last used</th><th></th></tr></thead><tbody id="k-rows"></tbody></table>
+    <div class="row" style="margin-top:10px">
+      <input type="text" id="k-name" placeholder="name, e.g. Home Assistant" aria-label="Key name" style="width:220px">
+      <select id="k-scope"><option value="labeling">labeling</option><option value="full">full</option></select>
+      <button class="btn" id="k-create">Create key</button>
+    </div>
+    <div class="hidden" id="k-new" style="margin-top:10px"><span class="small">New key, copy it now: it is not shown again.</span>
+      <pre class="log" id="k-value" style="user-select:all"></pre></div>
+  </div>
+  <div class="panel">
     <h2>Software update</h2>
     <div id="u-info" class="small muted">Checking…</div>
     <div class="row" style="margin-top:10px"><button class="btn primary hidden" id="u-start">Update now</button><span class="small muted" id="u-state"></span></div>
@@ -944,6 +958,28 @@ $("l-download").onclick = () => {
 };
 
 // ---- tabs ---------------------------------------------------------------------------
+// ---- API keys -------------------------------------------------------------------------
+async function loadKeys() {
+  let r;
+  try { r = await api("/api/keys"); } catch (e) { $("k-rows").innerHTML = `<tr><td colspan="6" class="muted">${esc(e.message)}</td></tr>`; return; }
+  $("k-rows").innerHTML = r.keys.map((k) => `<tr><td>${esc(k.name)}</td><td>${esc(k.scope)}</td><td><code>${esc(k.prefix)}…</code></td>
+    <td class="small">${esc(fmtTime(k.created_at))}</td><td class="small">${k.last_used ? esc(fmtTime(k.last_used)) : "never"}</td>
+    <td><button class="btn danger" data-revoke="${esc(k.id)}" style="padding:3px 9px">Revoke</button></td></tr>`).join("") ||
+    `<tr><td colspan="6" class="muted">No keys yet.</td></tr>`;
+}
+$("k-create").onclick = async () => {
+  try {
+    const r = await post("/api/keys", { name: $("k-name").value, scope: $("k-scope").value });
+    $("k-value").textContent = r.key; $("k-new").classList.remove("hidden"); $("k-name").value = ""; loadKeys();
+  } catch (e) { toast(e.message); }
+};
+$("k-name").addEventListener("keydown", (e) => e.stopPropagation());
+$("k-rows").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-revoke]"); if (!b) return;
+  if (!confirm("Revoke this key? Programs using it stop working.")) return;
+  try { await post(`/api/keys/${encodeURIComponent(b.dataset.revoke)}/revoke`, {}); toast("Revoked"); loadKeys(); } catch (e) { toast(e.message); }
+});
+
 // ---- software update ----------------------------------------------------------------
 const upd = { waiting: false, from: null, since: 0 };
 async function loadUpdate() {
@@ -989,7 +1025,7 @@ function switchTab(name) {
   if (name !== "label") audio.pause();
   if (name === "browse") loadBrowse();
   if (name === "train") pollJob();
-  if (name === "settings") { loadSettings().catch((e) => toast(e.message)); loadUpdate(); }
+  if (name === "settings") { loadSettings().catch((e) => toast(e.message)); loadUpdate(); loadKeys(); }
   if (name === "logs" && !logs.timer) { renderLogs(); pollLogs(); }
   store.set("tab", name);
 }
