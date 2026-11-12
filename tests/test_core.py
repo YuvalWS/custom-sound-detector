@@ -231,6 +231,8 @@ def test_web_api(tmp_path):
     assert listed["total"] == 1
     call(f"/api/clips/{clip['id']}/label", {"label": "knock"})
     assert json.loads(call("/api/clips?label=knock"))["total"] == 1
+    assert json.loads(call(f"/api/clips?label=all&find={clip['id'][-8:].upper()}"))["total"] == 1
+    assert json.loads(call("/api/clips?label=all&find=no-such-file.mp4"))["total"] == 0
     assert call(f"/api/clips/{clip['id']}/audio")[:4] == b"RIFF"
     assert b"Sound detector" in call("/")
     with pytest.raises(urllib.error.HTTPError) as err:

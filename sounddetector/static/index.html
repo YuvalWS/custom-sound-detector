@@ -155,7 +155,7 @@ a { color: var(--accent); cursor: pointer; }
         <button class="btn" id="play">▶ Play<kbd>Space</kbd></button>
         <button class="btn" id="prev">← Prev<kbd>←</kbd></button>
         <button class="btn" id="next">Skip →<kbd>→</kbd></button>
-        <button class="btn hidden" id="play-mark">▶ Marked part</button>
+        <button class="btn hidden" id="play-mark">▶ Marked part<kbd>M</kbd></button>
         <button class="btn hidden" id="clear-mark">Clear mark<kbd>C</kbd></button>
         <span class="spacer"></span>
         <button class="btn" id="undo" disabled>Undo<kbd>Z</kbd></button>
@@ -186,6 +186,7 @@ a { color: var(--accent); cursor: pointer; }
         <option value="score">Highest knock score</option><option value="loudest">Loudest</option>
       </select>
       <label class="small row" style="gap:6px"><input type="checkbox" id="b-detected"> Detections only</label>
+      <input type="search" id="b-find" placeholder="clip name or video file" style="width:220px" aria-label="Find clips by name or file">
       <span class="spacer"></span>
       <span class="small muted" id="b-count"></span>
     </div>
@@ -384,10 +385,11 @@ async function loadQueue(keepId) {
   if (keepId) { const j = state.queue.findIndex((c) => c.id === keepId); if (j >= 0) state.i = j; }
   showClip();
 }
-async function openIds(ids, title, startId) {
+async function openIds(ids, title, startId, cvScores) {
   const res = await api(`/api/clips?label=all&ids=${encodeURIComponent(ids.join(","))}&limit=2000`);
   const order = new Map(ids.map((id, i) => [id, i]));
   state.queue = res.clips.sort((a, b) => order.get(a.id) - order.get(b.id));
+  if (cvScores) state.queue.forEach((c) => { if (cvScores.has(c.id)) c.cv_score = cvScores.get(c.id); });
   state.i = Math.max(0, state.queue.findIndex((c) => c.id === startId));
   let opt = $("queue").querySelector('option[value="custom"]');
   if (!opt) { opt = document.createElement("option"); opt.value = "custom"; $("queue").appendChild(opt); }
@@ -410,10 +412,12 @@ async function showClip() {
   for (const d of clip.detections || []) best[d.target] = Math.max(best[d.target] || 0, d.score);
   const det = Object.keys(best).length ? `<span class="chip" style="background:var(--accent);color:var(--accent-text)">detected: ${esc(Object.entries(best).map(([t, sc]) => `${pretty(t)} ${sc.toFixed(2)}`).join(", "))}</span>` : "";
   const score = clip.scores && clip.scores.knock !== undefined ? `<span>knock score <span class="scorebar"><i style="width:${Math.round(clip.scores.knock * 100)}%"></i></span> ${clip.scores.knock.toFixed(2)}</span>` : "";
-  const src = clip.imported_from ? `<span class="muted">imported: ${esc(clip.imported_from)}</span>` : "";
+  const src = clip.imported_from ? `<span class="muted">from ${esc(clip.imported_from)}${clip.import_offset != null ? ` at ${clip.import_offset} s` : ""}</span>` : "";
+  const cv = clip.cv_score != null ? `<span class="chip" title="Score when the model had not seen this clip (cross-validation)">cross-validated ${clip.cv_score.toFixed(2)}</span>` : "";
   $("clip-meta").innerHTML = `<b>${esc(fmtTime(clip.recorded_at))}</b><span class="muted">${clip.duration}s</span>` +
     (clip.peak_dbfs != null ? `<span class="muted">peak ${clip.peak_dbfs} dBFS</span>` : "") + score + src +
-    `<span>label: <span class="label-tag ${clip.label === "knock" ? "knock" : clip.label ? "" : "none"}">${esc(pretty(clip.label))}</span></span>` + det;
+    `<span>label: <span class="label-tag ${clip.label === "knock" ? "knock" : clip.label ? "" : "none"}">${esc(pretty(clip.label))}</span></span>` + cv + det +
+    `<a class="small muted clip-id" title="Clip name: click to copy">${esc(clip.id)}</a>`;
   $("clip-hints").innerHTML = (clip.hints || []).map(([n, s]) => `<span class="chip" title="Stock YAMNet guess">${esc(n)} ${s}</span>`).join("") || "";
   document.querySelectorAll("[data-label]").forEach((b) => b.classList.toggle("current", b.dataset.label === clip.label));
   renderCats();
@@ -474,18 +478,25 @@ function renderCats() {
   const cur = state.current?.label;
   $("cats").innerHTML = cats.map((c, i) => `<button class="cat${cur === c ? " current" : ""}" data-cat="${esc(c)}">${esc(pretty(c))}${i < 10 ? `<kbd>${(i + 1) % 10}</kbd>` : ""}</button>`).join("");
 }
+$("clip-meta").addEventListener("click", (e) => {
+  const a = e.target.closest(".clip-id"); if (!a) return;
+  navigator.clipboard?.writeText(a.textContent).then(() => toast("Name copied"), () => {});
+});
 $("cats").addEventListener("click", (e) => { const b = e.target.closest("[data-cat]"); if (b) applyLabel(b.dataset.cat); });
 document.querySelectorAll("[data-label]").forEach((b) => b.addEventListener("click", () => applyLabel(b.dataset.label)));
 $("delete").onclick = deleteCurrent;
 $("undo").onclick = undo;
 $("prev").onclick = () => { if (state.i > 0) { state.i--; showClip(); } };
 $("next").onclick = () => { if (state.i < state.queue.length - 1) { state.i++; showClip(); } };
-$("play").onclick = () => { if (audio.paused) { if (audio.ended) audio.currentTime = 0; audio.play().catch(() => {}); } else audio.pause(); };
+$("play").onclick = () => {
+  playMarked.run = (playMarked.run || 0) + 1; // plain play is not limited to the mark
+  if (audio.paused) { if (audio.ended) audio.currentTime = 0; audio.play().catch(() => {}); } else audio.pause();
+};
 $("queue").onchange = () => { if ($("queue").value !== "custom") loadQueue(); };
 $("autoplay").checked = store.get("autoplay", true);
 $("autoplay").onchange = () => store.set("autoplay", $("autoplay").checked);
 // Click plays from that point; a drag marks the part of the clip the label is about.
-const suggestedSpan = (clip) => (!clip?.span && (!clip?.label || clip.label === "knock") && clip?.suggested_spans?.knock) || null;
+const suggestedSpan = (clip) => (!clip?.span && clip?.suggested_spans?.knock) || null;
 function drawMark(span, drafting = false) {
   const suggested = span === undefined && !!suggestedSpan(state.current);
   if (span === undefined) span = state.current?.span || suggestedSpan(state.current);
@@ -496,7 +507,7 @@ function drawMark(span, drafting = false) {
   m.classList.toggle("suggested", show && suggested && !drafting);
   $("mark-note").classList.toggle("hidden", !(show && suggested && !drafting));
   $("clear-mark").classList.toggle("hidden", !state.current?.span);
-  $("play-mark").classList.toggle("hidden", !state.current?.span);
+  $("play-mark").classList.toggle("hidden", !(state.current?.span || suggestedSpan(state.current)));
   if (!show) return;
   const [a, b] = span[0] <= span[1] ? span : [span[1], span[0]];
   m.style.left = `${(a / d) * 100}%`;
@@ -510,6 +521,7 @@ async function saveSpan(span) {
     toast(span ? `Marked ${updated.span[0]}–${updated.span[1]} s` : "Mark cleared");
   } catch (e) { toast(e.message); }
   drawMark();
+  if (span && clip.span) playMarked(); // hear what was marked
 }
 let markStart = null; // seconds where a drag began
 const specTime = (e) => { const r = $("spec-wrap").getBoundingClientRect(); return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * (state.current?.duration || 0); };
@@ -527,17 +539,22 @@ $("spec-wrap").addEventListener("pointerup", (e) => {
   if (!markStart) return;
   const { t, dragging } = markStart; markStart = null;
   if (dragging) { const u = specTime(e); saveSpan([Math.min(t, u), Math.max(t, u)]); return; }
+  playMarked.run = (playMarked.run || 0) + 1;
   if (audio.duration) { audio.currentTime = (t / state.current.duration) * audio.duration; audio.play().catch(() => {}); }
 });
 $("spec-wrap").addEventListener("pointercancel", () => { markStart = null; drawMark(); });
 $("clear-mark").onclick = () => saveSpan(null);
-$("play-mark").onclick = () => {
-  const sp = state.current?.span; if (!sp || !audio.duration) return;
+function playMarked() {
+  const sp = state.current?.span || suggestedSpan(state.current); if (!sp || !audio.duration) return;
   audio.currentTime = sp[0]; audio.play().catch(() => {});
-  const stopAt = sp[1], id = state.current.id;
-  const watch = () => { if (state.current?.id !== id || audio.paused) return; if (audio.currentTime >= stopAt) { audio.pause(); return; } requestAnimationFrame(watch); };
-  requestAnimationFrame(watch);
-};
+  const stopAt = sp[1], id = state.current.id, run = (playMarked.run = (playMarked.run || 0) + 1);
+  // Stop at the end of the mark, unless something else took over playback meanwhile.
+  const timer = setInterval(() => {
+    if (run !== playMarked.run || state.current?.id !== id || audio.paused || audio.currentTime < sp[0] - 0.05) return clearInterval(timer);
+    if (audio.currentTime >= stopAt) { audio.pause(); clearInterval(timer); }
+  }, 20);
+}
+$("play-mark").onclick = playMarked;
 async function addCategory() {
   const name = $("new-cat").value.trim().toLowerCase().replace(/[\s-]+/g, "_");
   if (!name) return;
@@ -559,6 +576,7 @@ document.addEventListener("keydown", (e) => {
   else if (k === "u") applyLabel("unsure");
   else if (k === "z") undo();
   else if (k === "c") { if (state.current?.span) saveSpan(null); }
+  else if (k === "m") playMarked();
   else if (k === "delete" || k === "backspace") deleteCurrent();
   else if (k === "arrowleft") $("prev").click();
   else if (k === "arrowright") $("next").click();
@@ -586,7 +604,7 @@ function fillLabelSelects() {
 }
 async function loadBrowse(reset = true) {
   if (reset) { browse.offset = 0; browse.rows = []; browse.selected.clear(); }
-  const q = `label=${encodeURIComponent($("b-label").value)}&sort=${$("b-sort").value}&detected=${$("b-detected").checked ? 1 : 0}&offset=${browse.offset}&limit=100`;
+  const q = `label=${encodeURIComponent($("b-label").value)}&sort=${$("b-sort").value}&detected=${$("b-detected").checked ? 1 : 0}&find=${encodeURIComponent($("b-find").value.trim())}&offset=${browse.offset}&limit=100`;
   const res = await api(`/api/clips?${q}`);
   browse.rows.push(...res.clips); browse.offset += res.clips.length;
   $("b-count").textContent = `${res.total} clips`;
@@ -597,7 +615,8 @@ function renderBrowse() {
   $("b-rows").innerHTML = browse.rows.map((c) => `<tr data-id="${esc(c.id)}" class="${browse.selected.has(c.id) ? "sel" : ""}">
     <td><input type="checkbox" class="b-sel" ${browse.selected.has(c.id) ? "checked" : ""} aria-label="Select"></td>
     <td><button class="btn b-play" style="padding:3px 9px" aria-label="Play">▶</button></td>
-    <td><a class="b-open">${esc(fmtTime(c.recorded_at))}</a>${c.detections?.length ? ` <span class="chip">detected</span>` : ""}</td>
+    <td><a class="b-open">${esc(fmtTime(c.recorded_at))}</a>${c.detections?.length ? ` <span class="chip">detected</span>` : ""}
+      <div class="small muted">${esc(c.id)}${c.imported_from ? ` · ${esc(c.imported_from)} at ${c.import_offset} s` : ""}</div></td>
     <td class="num hide-sm">${c.duration}s</td><td class="num hide-sm">${c.peak_dbfs ?? ""}</td>
     <td class="hide-sm small">${esc((c.hints || []).map(([n, s]) => `${n} ${s}`).join(", "))}</td>
     <td class="num">${c.scores?.knock !== undefined ? c.scores.knock.toFixed(2) : ""}</td>
@@ -613,6 +632,8 @@ $("b-rows").addEventListener("click", async (e) => {
 $("b-all").onchange = (e) => { browse.rows.forEach((r) => e.target.checked ? browse.selected.add(r.id) : browse.selected.delete(r.id)); renderBrowse(); };
 ["b-label", "b-sort", "b-detected"].forEach((id) => $(id).onchange = () => loadBrowse());
 $("b-more").onclick = () => loadBrowse(false);
+$("b-find").addEventListener("input", () => { clearTimeout(loadBrowse._t); loadBrowse._t = setTimeout(() => loadBrowse(), 250); });
+$("b-find").addEventListener("keydown", (e) => e.stopPropagation());
 $("b-apply").onclick = async () => {
   if (!browse.selected.size) return toast("Select clips first");
   const label = $("b-bulk-label").value || null;
@@ -658,11 +679,12 @@ async function loadReport() {
     <div style="overflow-x:auto"><table><thead><tr><th>Label</th><th class="num">Clips</th><th class="num">Mean score</th><th class="num">Max</th><th class="num">Above threshold</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
     ${r.confusing.length ? `<p><a id="review-confusing">Review the ${r.confusing.length} clips the model got wrong</a> <span class="small muted">(a wrong label is the usual cause)</span></p>` : `<p class="small muted">The model got every clip right in cross-validation.</p>`}
     </div>`;
+  const cvMap = new Map(r.clip_scores.map((c) => [c.id, c.score]));
   $("t-report").querySelectorAll("[data-review]").forEach((a) => a.onclick = () => {
     const ids = r.clip_scores.filter((c) => c.label === a.dataset.review).map((c) => c.id);
-    openIds(ids, `${pretty(a.dataset.review)}, by ${pretty(target).toLowerCase()} score`);
+    openIds(ids, `${pretty(a.dataset.review)}, by ${pretty(target).toLowerCase()} score`, null, cvMap);
   });
-  const rc = $("review-confusing"); if (rc) rc.onclick = () => openIds(r.confusing.map((c) => c.id), "Model got these wrong");
+  const rc = $("review-confusing"); if (rc) rc.onclick = () => openIds(r.confusing.map((c) => c.id), "Model got these wrong", null, cvMap);
 }
 $("t-target").onchange = loadReport;
 $("t-start").onclick = async () => {

@@ -127,6 +127,9 @@ class Server:
             clips = [c for c in clips if c.get("detections")]
         if q.get("source") == "import":
             clips = [c for c in clips if c.get("imported_from")]
+        if q.get("find"):
+            needle = q["find"].lower()
+            clips = [c for c in clips if needle in c["id"].lower() or needle in (c.get("imported_from") or "").lower()]
         if q.get("day"):
             clips = [c for c in clips if c.get("day") == q["day"]]
         if q.get("ids"):
