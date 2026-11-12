@@ -17,6 +17,8 @@ from .config import stream_url
 from .events import Event, Segmenter
 from .features import clip_features, event_windows, suggest_span, sustained_score
 from .store import ClipStore
+from .suggest import Suggester
+from .suggest import model_file as suggest_file
 from .yamnet import WINDOW, YamNet
 
 log = logging.getLogger(__name__)
@@ -57,23 +59,25 @@ class TargetState:
         self.run_start: float | None = None  # when the scores went above the threshold
 
 
-def model_outputs(models: dict, feats: dict, samples: np.ndarray) -> dict:
-    """Each model's clip score, and where in the clip it hears its sound (a suggested mark)."""
+def model_outputs(models: dict, feats: dict, samples: np.ndarray, suggester=None) -> dict:
+    """Each model's clip score, where in the clip it hears its sound (a suggested mark), and
+    the suggested labels."""
     emb = feats["emb"].astype(np.float32)
     scores, spans = {}, {}
+    extra = {"label_suggestions": suggester.suggest(feats)} if suggester else {}
     for t, m in models.items():
         p = m.predict(emb)
         scores[t] = round(sustained_score(p, feats["starts"], m.sustain), 3)
         span = suggest_span(p, feats["starts"], samples)
         if span:
             spans[t] = span
-    return {"scores": scores, "suggested_spans": spans}
+    return {"scores": scores, "suggested_spans": spans, **extra}
 
 
-def describe_clip(yamnet: YamNet, models: dict, feats: dict, samples: np.ndarray) -> dict:
+def describe_clip(yamnet: YamNet, models: dict, feats: dict, samples: np.ndarray, suggester=None) -> dict:
     sel = event_windows(feats["levels"])
     return {"hints": yamnet.top_labels(feats["scores"][sel].astype(np.float32)),
-            **model_outputs(models, feats, samples)}
+            **model_outputs(models, feats, samples, suggester)}
 
 
 class App:
@@ -90,6 +94,7 @@ class App:
         self.yamnet = YamNet(cfg["yamnet_model"])
         self.ring = Ring(30)
         self.models: dict = {}
+        self.suggester = None
         self.states: dict[str, TargetState] = {}
         self._models_mtime = None
         self._hits: deque = deque(maxlen=200)  # (absolute pos, target, score)
@@ -113,6 +118,8 @@ class App:
         for target in self.cfg["detection"]["targets"]:
             p = model_path(self.cfg["data_dir"], target)
             sig.append(p.stat().st_mtime if p.exists() else None)
+        p = suggest_file(self.cfg["data_dir"])
+        sig.append(p.stat().st_mtime if p.exists() else None)
         return tuple(sig)
 
     def reload_models(self, force: bool = False) -> None:
@@ -122,6 +129,7 @@ class App:
         self._models_mtime = sig
         det = self.cfg["detection"]
         models = load_targets(self.cfg["data_dir"], det["targets"], self.yamnet.sha256, det.get("thresholds"))
+        self.suggester = Suggester.load(self.cfg["data_dir"], self.yamnet.sha256)
         with self._lock:
             self.models = models if det["enabled"] else {}
             self.states = {t: self.states.get(t, TargetState()) for t in self.models}
@@ -263,7 +271,8 @@ class App:
             if saved is None:
                 return
             feats = clip_features(self.store, self.yamnet, saved["id"])
-            saved = self.store.update(saved["id"], **describe_clip(self.yamnet, self.models, feats, samples))
+            saved = self.store.update(saved["id"], **describe_clip(self.yamnet, self.models, feats, samples,
+                                                                   self.suggester))
             log.info("clip %s (%.1fs, peak %.0f dBFS) %s", saved["id"], saved["duration"], event.peak_dbfs,
                      ", ".join(f"{n} {s}" for n, s in saved["hints"]))
             if self.publisher:

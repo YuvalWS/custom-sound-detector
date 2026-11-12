@@ -64,7 +64,11 @@ def cmd_train(cfg, args):
     rule = report["threshold_rule"]
     print(f"\nthreshold {report['threshold']}: " + ", ".join(f"{k} {v}" for k, v in rule.items()))
     targets = sorted(set(cfg["detection"]["targets"]) | {args.target})
-    rescore(store, yam, load_targets(cfg["data_dir"], targets, yam.sha256))
+    from .suggest import Suggester, train_suggester
+
+    train_suggester(store, yam, cfg["data_dir"], C=float(cfg["training"]["C"]))
+    rescore(store, yam, load_targets(cfg["data_dir"], targets, yam.sha256),
+            suggester=Suggester.load(cfg["data_dir"], yam.sha256))
     print("\nA running service picks the new model up within 10 seconds.")
 
 

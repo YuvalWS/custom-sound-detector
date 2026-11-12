@@ -87,6 +87,12 @@ To update later:
 pct exec <ctid> -- update
 ```
 
+Or press **Update now** in Settings → Software update, which shows what changed since the
+installed version. The service runs unprivileged, so the button only writes a request file
+in the data directory; a systemd path unit (`sound-detector-update.path`, set up by the
+installer) sees it and runs `update` as root. It works on any install made by `install.sh`,
+Proxmox or not. Installs from before the button need one `update` from the shell to set it up.
+
 An update replaces only the code in `/opt/sound-detector` and its Python packages. It never
 touches the config file, the data directory (clips, labels, models, reports, `settings.yaml`)
 or the YAMNet model file, and it restarts the service.
@@ -196,6 +202,14 @@ A good first dataset:
   saying "yes": the budget can only raise it, so kinds of sound nobody labeled don't slip
   through a low threshold. Override it per target with `detection.thresholds`.
 - At least 5 target clips and 10 others are needed.
+
+**Label suggestions.** Every training also trains one more model, over all your labels at
+once (a multinomial logistic regression on the same features, labels with at least 3 clips).
+It suggests a label for every clip: in the Label tab press A to accept the first suggestion
+or click another; in Browse, filter by suggested label (then select all and label them in
+bulk) or sort by how sure it is. The Train tab shows how often it was right on clips it had
+not seen. Detection never uses it. On the first real dataset (614 clips, 9 labels) its first
+suggestion was right 81% of the time, and the right label was in its top three 97%.
 
 The running service picks up a new model within seconds. The previous one is kept in
 `models/history/`, with the report it came with. Every model file (about 45 kB, plus about

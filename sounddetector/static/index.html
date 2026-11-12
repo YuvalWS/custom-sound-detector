@@ -62,6 +62,7 @@ canvas.spec { display: block; width: 100%; height: 180px; image-rendering: auto;
 .playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; opacity: .85; left: 0; pointer-events: none; }
 .mark { position: absolute; top: 0; bottom: 0; background: #ffffff1f; border-left: 2px solid #7ee0a1; border-right: 2px solid #7ee0a1; pointer-events: none; box-shadow: 0 0 0 9999px #0000008c; }
 .mark.drafting { border-color: #ffffffb0; box-shadow: none; }
+.suggest-chip { padding: 3px 10px; font-size: 13px; border-style: dashed; }
 .mark.suggested { border-style: dashed; border-color: #ffd166; background: #ffd16614; box-shadow: none; }
 .mark-note { position: absolute; top: 4px; right: 8px; font-size: 11px; color: #ffd166; pointer-events: none; }
 .cut { position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px solid #ff6b8a; pointer-events: none; }
@@ -144,6 +145,7 @@ a { color: var(--accent); cursor: pointer; }
     <div id="clip-body">
       <div class="meta-line" id="clip-meta"></div>
       <div class="chips" id="clip-hints" style="margin-top:8px"></div>
+      <div class="chips hidden" id="clip-suggest" style="margin-top:6px"></div>
       <div class="spec-wrap" id="spec-wrap" title="Click to play from here (and set where Split cuts); drag to mark the part the label is about">
         <canvas class="spec" id="spec"></canvas>
         <div class="mark hidden" id="mark"></div>
@@ -188,7 +190,9 @@ a { color: var(--accent); cursor: pointer; }
       <select id="b-sort">
         <option value="newest">Newest</option><option value="oldest">Oldest</option>
         <option value="score">Highest knock score</option><option value="loudest">Loudest</option>
+        <option value="suggestion">Most confident suggestion</option>
       </select>
+      <select id="b-suggested" aria-label="Filter by suggested label"></select>
       <label class="small row" style="gap:6px"><input type="checkbox" id="b-detected"> Detections only</label>
       <input type="search" id="b-find" placeholder="clip name or video file" style="width:220px" aria-label="Find clips by name or file">
       <button class="btn" id="b-clear">Clear filters</button>
@@ -208,7 +212,7 @@ a { color: var(--accent); cursor: pointer; }
       <thead><tr>
         <th><input type="checkbox" id="b-all" aria-label="Select all"></th><th></th><th>Recorded</th>
         <th class="num hide-sm">Length</th><th class="num hide-sm">Peak</th><th class="hide-sm">Sounds like</th>
-        <th class="num">Knock score</th><th>Label</th>
+        <th>Suggested</th><th class="num">Knock score</th><th>Label</th>
       </tr></thead>
       <tbody id="b-rows"></tbody>
     </table>
@@ -230,6 +234,7 @@ a { color: var(--accent); cursor: pointer; }
     <pre class="log hidden" id="t-log"></pre>
   </div>
   <div id="t-report"></div>
+  <div id="t-suggest"></div>
 </section>
 
 <section id="tab-settings" class="hidden">
@@ -250,6 +255,12 @@ a { color: var(--accent); cursor: pointer; }
       the training reports and your categories. Settings are left out, since they hold passwords. To restore, stop the
       service and extract the archive into the data directory.</p>
     <a class="btn" id="s-export" href="api/export" download style="display:inline-block;color:inherit;text-decoration:none">Download backup</a>
+  </div>
+  <div class="panel">
+    <h2>Software update</h2>
+    <div id="u-info" class="small muted">Checking…</div>
+    <div class="row" style="margin-top:10px"><button class="btn primary hidden" id="u-start">Update now</button><span class="small muted" id="u-state"></span></div>
+    <pre class="log hidden" id="u-log"></pre>
   </div>
 </section>
 
@@ -432,6 +443,10 @@ async function showClip() {
     `<span>label: <span class="label-tag ${clip.label === "knock" ? "knock" : clip.label ? "" : "none"}">${esc(pretty(clip.label))}</span></span>` + cv + det +
     `<a class="small muted clip-id" title="Clip name: click to copy">${esc(clip.id)}</a>`;
   $("clip-hints").innerHTML = (clip.hints || []).map(([n, s]) => `<span class="chip" title="Stock YAMNet guess">${esc(n)} ${s}</span>`).join("") || "";
+  const sug = clip.label_suggestions || [];
+  $("clip-suggest").classList.toggle("hidden", !sug.length);
+  $("clip-suggest").innerHTML = sug.length ? `<span class="small muted">Suggested label:</span>` + sug.map(([l, p], i) =>
+    `<button class="btn suggest-chip" data-suggest="${esc(l)}" title="Learned from your labels. Click to label it so${i === 0 ? " (A)" : ""}">${esc(pretty(l))} ${Math.round(p * 100)}%${i === 0 ? "<kbd>A</kbd>" : ""}</button>`).join("") : "";
   document.querySelectorAll("[data-label]").forEach((b) => b.classList.toggle("current", b.dataset.label === clip.label));
   renderCats();
   const onset = $("onset");
@@ -601,6 +616,7 @@ async function addCategory() {
   try { await post("/api/categories", { name }); $("new-cat").value = ""; await refreshStatus(); await applyLabel(name); } catch (e) { toast(e.message); }
 }
 $("add-cat").onclick = addCategory;
+$("clip-suggest").addEventListener("click", (e) => { const b = e.target.closest("[data-suggest]"); if (b) applyLabel(b.dataset.suggest); });
 $("new-cat").addEventListener("keydown", (e) => { if (e.key === "Enter") addCategory(); e.stopPropagation(); });
 (function tick() {
   if (audio.duration) $("playhead").style.left = `${(audio.currentTime / audio.duration) * 100}%`;
@@ -614,6 +630,7 @@ document.addEventListener("keydown", (e) => {
   else if (k === "k") applyLabel("knock");
   else if (k === "n") applyLabel("not_knock");
   else if (k === "u") applyLabel("unsure");
+  else if (k === "a") { const top = state.current?.label_suggestions?.[0]; if (top) applyLabel(top[0]); }
   else if (k === "z") undo();
   else if (k === "c") { if (state.current?.span) saveSpan(null); }
   else if (k === "m") playMarked();
@@ -633,6 +650,9 @@ function fillLabelSelects() {
   b.innerHTML = [["all", "All clips"], ["unlabeled", "Unlabeled"], ["labeled", "Labeled"], ["negative", "Every non-knock label"],
     ...labels.map((l) => [l, pretty(l)])].map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join("");
   b.value = keep || "all";
+  const sg = $("b-suggested"), sk = sg.value;
+  sg.innerHTML = `<option value="">Any suggestion</option>` + labels.filter((l) => l !== "unsure").map((l) => `<option value="${esc(l)}">Suggested: ${esc(pretty(l))}</option>`).join("");
+  sg.value = sk || "";
   for (const id of ["b-bulk-label", "i-label"]) {
     const s = $(id), k = s.value;
     s.innerHTML = (id === "i-label" ? `<option value="">(no label)</option>` : `<option value="">(remove label)</option>`) +
@@ -645,7 +665,7 @@ function fillLabelSelects() {
 }
 async function loadBrowse(reset = true) {
   if (reset) { browse.offset = 0; browse.rows = []; browse.selected.clear(); }
-  const q = `label=${encodeURIComponent($("b-label").value)}&sort=${$("b-sort").value}&detected=${$("b-detected").checked ? 1 : 0}&find=${encodeURIComponent($("b-find").value.trim())}&offset=${browse.offset}&limit=100`;
+  const q = `label=${encodeURIComponent($("b-label").value)}&sort=${$("b-sort").value}&detected=${$("b-detected").checked ? 1 : 0}&find=${encodeURIComponent($("b-find").value.trim())}&suggested=${encodeURIComponent($("b-suggested").value)}&offset=${browse.offset}&limit=100`;
   const res = await api(`/api/clips?${q}`);
   browse.rows.push(...res.clips); browse.offset += res.clips.length;
   $("b-count").textContent = `${res.total} clips`;
@@ -660,6 +680,7 @@ function renderBrowse() {
       <div class="small muted">${esc(c.id)}${c.imported_from ? ` · ${esc(c.imported_from)} at ${c.import_offset} s` : ""}</div></td>
     <td class="num hide-sm">${c.duration}s</td><td class="num hide-sm">${c.peak_dbfs ?? ""}</td>
     <td class="hide-sm small">${esc((c.hints || []).map(([n, s]) => `${n} ${s}`).join(", "))}</td>
+    <td class="small">${c.label_suggestions?.length ? `${esc(pretty(c.label_suggestions[0][0]))} ${Math.round(c.label_suggestions[0][1] * 100)}%` : ""}</td>
     <td class="num">${c.scores?.knock !== undefined ? c.scores.knock.toFixed(2) : ""}</td>
     <td><span class="label-tag ${c.label === "knock" ? "knock" : c.label ? "" : "none"}">${esc(pretty(c.label))}</span></td></tr>`).join("");
   $("b-selcount").textContent = browse.selected.size;
@@ -671,10 +692,10 @@ $("b-rows").addEventListener("click", async (e) => {
   else if (e.target.closest(".b-open")) { openIds(browse.rows.map((r) => r.id), "From Browse", id); }
 });
 $("b-all").onchange = (e) => { browse.rows.forEach((r) => e.target.checked ? browse.selected.add(r.id) : browse.selected.delete(r.id)); renderBrowse(); };
-["b-label", "b-sort", "b-detected"].forEach((id) => $(id).onchange = () => loadBrowse());
+["b-label", "b-sort", "b-detected", "b-suggested"].forEach((id) => $(id).onchange = () => loadBrowse());
 $("b-more").onclick = () => loadBrowse(false);
 $("b-clear").onclick = () => {
-  $("b-label").value = "all"; $("b-sort").value = "newest"; $("b-detected").checked = false; $("b-find").value = "";
+  $("b-label").value = "all"; $("b-sort").value = "newest"; $("b-detected").checked = false; $("b-find").value = ""; $("b-suggested").value = "";
   loadBrowse();
 };
 $("b-find").addEventListener("input", () => { clearTimeout(loadBrowse._t); loadBrowse._t = setTimeout(() => loadBrowse(), 250); });
@@ -693,7 +714,20 @@ $("b-delete").onclick = async () => {
 };
 
 // ---- train tab ----------------------------------------------------------------------
+async function loadSuggestReport() {
+  const r = await api("/api/report?target=label_suggester").catch(() => null);
+  if (!r) { $("t-suggest").innerHTML = ""; return; }
+  const pct = (v) => v == null ? "–" : `${Math.round(v * 100)}%`;
+  const rows = r.labels.map((l) => `<tr><td>${esc(pretty(l.label))}</td><td class="num">${l.clips}</td><td class="num">${pct(l.top1)}</td><td class="num">${pct(l.top3)}</td></tr>`).join("");
+  $("t-suggest").innerHTML = `<div class="panel">
+    <div class="row" style="margin-bottom:8px"><b>Label suggestions</b><span class="muted small">trained ${esc(fmtTime(r.trained_at))}, with every training</span></div>
+    <p class="small muted">One model over all your labels, to suggest a label in the Label and Browse tabs (press A to accept it). Detection never uses it.
+      On clips it had not seen, its first suggestion was right ${pct(r.top1)} of the time, and the right label was in its top three ${pct(r.top3)}.
+      ${r.left_out?.length ? `Labels with fewer than 3 clips are left out: ${esc(r.left_out.map(pretty).join(", "))}.` : ""}</p>
+    <table><thead><tr><th>Label</th><th class="num">Clips</th><th class="num">First suggestion right</th><th class="num">In top 3</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
 async function loadReport() {
+  loadSuggestReport();
   const target = $("t-target").value || "knock";
   const counts = STATUS?.stats.labels || {}, pos = counts[target] || 0;
   const neg = Object.entries(counts).filter(([l]) => l !== target && l !== "unsure").reduce((a, [, n]) => a + n, 0);
@@ -910,13 +944,52 @@ $("l-download").onclick = () => {
 };
 
 // ---- tabs ---------------------------------------------------------------------------
+// ---- software update ----------------------------------------------------------------
+const upd = { waiting: false, from: null, since: 0 };
+async function loadUpdate() {
+  let u;
+  try { u = await api("/api/update"); } catch (e) { if (upd.waiting) { $("u-state").textContent = "Updating… the service is restarting"; setTimeout(loadUpdate, 3000); } return; }
+  const short = (c) => (c || "").slice(0, 7);
+  const inst = u.installed, latest = u.latest;
+  if (!inst) {
+    $("u-info").innerHTML = `Version ${esc(u.version)}. Updating from here needs an install made by <code>install.sh</code>; run <code>update</code> in the container once to set it up.`;
+    $("u-start").classList.add("hidden"); return;
+  }
+  const current = latest && latest.commit === inst.commit;
+  const changes = latest?.changes?.length ? `<ul style="margin:6px 0 0 18px">${latest.changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>` : "";
+  $("u-info").innerHTML = `Installed: <code>${esc(short(inst.commit))}</code> from ${esc(fmtTime(inst.date))} (${esc(inst.branch)}). ` +
+    (!latest ? "Could not reach the repository to check for a newer version." :
+     current ? "This is the latest version." : `Newer: <code>${esc(short(latest.commit))}</code>${latest.changes ? `, ${latest.changes.length} change${latest.changes.length === 1 ? "" : "s"}:` : "."}${changes}`);
+  $("u-start").classList.toggle("hidden", !u.can_update);
+  $("u-start").textContent = current ? "Reinstall" : "Update now";
+  $("u-start").disabled = upd.waiting || u.requested;
+  if (u.log?.length && (upd.waiting || (u.log_time && Date.now() / 1000 - u.log_time < 3600))) {
+    $("u-log").textContent = u.log.join("\n"); $("u-log").classList.remove("hidden");
+  }
+  if (upd.waiting) {
+    const done = inst.commit !== upd.from || (!u.requested && u.log_time && u.log_time > upd.since);
+    if (done) { upd.waiting = false; $("u-start").disabled = false; $("u-state").textContent = "Updated. Reload the page to use the new version."; toast("Update finished"); }
+    else { $("u-state").textContent = "Updating… this takes a minute or two"; setTimeout(loadUpdate, 3000); }
+  }
+}
+$("u-start").onclick = async () => {
+  if (!confirm("Update to the latest version and restart the service? Detection pauses for about a minute.")) return;
+  try {
+    const u = await api("/api/update");
+    upd.from = u.installed?.commit; upd.since = Date.now() / 1000;
+    await post("/api/update", {});
+    upd.waiting = true; $("u-start").disabled = true; $("u-state").textContent = "Update requested…";
+    setTimeout(loadUpdate, 3000);
+  } catch (e) { toast(e.message); }
+};
+
 function switchTab(name) {
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll("main > section").forEach((s) => s.classList.toggle("hidden", s.id !== `tab-${name}`));
   if (name !== "label") audio.pause();
   if (name === "browse") loadBrowse();
   if (name === "train") pollJob();
-  if (name === "settings") loadSettings().catch((e) => toast(e.message));
+  if (name === "settings") { loadSettings().catch((e) => toast(e.message)); loadUpdate(); }
   if (name === "logs" && !logs.timer) { renderLogs(); pollLogs(); }
   store.set("tab", name);
 }

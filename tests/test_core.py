@@ -237,6 +237,35 @@ def test_each_saved_clip_is_published_with_its_score():
     assert info["audio"] == "api/clips/door-20261112-120000-000/audio"
 
 
+def test_label_suggestions(tmp_path):
+    from sounddetector.app import model_outputs
+    from sounddetector.features import clip_features
+    from sounddetector.suggest import Suggester, report_file, train_suggester
+
+    store = ClipStore(tmp_path)
+    assert train_suggester(store, FakeYamNet(), tmp_path) is None  # nothing labeled yet
+    _labeled_dataset(store)
+    report = train_suggester(store, FakeYamNet(), tmp_path)
+    assert set(report["classes"]) == {"knock", "doorbell_chime", "not_knock"}
+    assert report["top1"] is not None and 0 <= report["top1"] <= report["top3"] <= 1
+    assert report_file(tmp_path).exists()
+    sug = Suggester.load(tmp_path, FakeYamNet.sha256)
+    assert Suggester.load(tmp_path, "0" * 64) is None  # other YAMNet file
+    knock_clip = next(m for m in store.all() if m["label"] == "knock")
+    feats = clip_features(store, FakeYamNet(), knock_clip["id"])
+    out = model_outputs({}, feats, store.samples(knock_clip["id"]), sug)
+    (best, p), *rest = out["label_suggestions"]
+    assert best == "knock" and 0 < p <= 1 and len(rest) == 2
+    # Two labels: still a valid ranking (a binary fit, turned into two rows).
+    s2 = ClipStore(tmp_path / "two")
+    for _ in range(4):
+        s2.set_label(s2.save(knock(noise(3), 1.0), {"source": "d"}, enforce_rate=False)["id"], "knock")
+        s2.set_label(s2.save(chime(noise(3), 1.0), {"source": "d"}, enforce_rate=False)["id"], "door")
+    assert train_suggester(s2, FakeYamNet(), tmp_path / "two")["classes"] == ["door", "knock"]
+    s = Suggester.load(tmp_path / "two", FakeYamNet.sha256)
+    assert s.probs(np.zeros((1, 1024))).sum() == pytest.approx(1)
+
+
 def test_event_counts_give_events_per_day(tmp_path):
     import time as _t
 
@@ -292,6 +321,15 @@ def test_web_api(tmp_path):
     if shutil.which("ffmpeg"):  # Ogg/Opus, for a Telegram voice note
         assert call(f"/api/clips/{clip['id']}/audio?format=ogg")[:4] == b"OggS"
     assert b"Sound detector" in call("/")
+    # Not installed by install.sh: the UI can show the version, but not update.
+    sw = json.loads(call("/api/update"))
+    assert sw["can_update"] is False and sw["installed"] is None
+    with pytest.raises(urllib.error.HTTPError) as err:
+        call("/api/update", {})
+    assert err.value.code == 400 and not (tmp_path / "update-request").exists()
+    store.update(clip["id"], label_suggestions=[["door", 0.8], ["voice", 0.1]])
+    assert json.loads(call("/api/clips?label=all&suggested=door"))["total"] == 1
+    assert json.loads(call("/api/clips?label=all&suggested=voice"))["total"] == 0
     (tmp_path / "settings.yaml").write_text("mqtt: {password: secret}")
     (tmp_path / "models" / "history").mkdir(parents=True)
     (tmp_path / "models" / "history" / "knock-old.json").write_text("{}")

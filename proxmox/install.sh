@@ -108,8 +108,40 @@ ReadWritePaths=$DATA_DIR
 [Install]
 WantedBy=multi-user.target
 EOF
+# The web UI's "Update" button. The service runs unprivileged, so it only writes a request
+# file; this path unit sees it and runs `update` as root. The request is removed first, so
+# the update runs once; its output goes to update.log, which the UI shows.
+cat > /etc/systemd/system/sound-detector-update.service <<EOF
+[Unit]
+Description=Update custom-sound-detector (requested from its web UI)
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/rm -f $DATA_DIR/update-request
+ExecStart=/bin/bash -c '/usr/bin/update >$DATA_DIR/update.log 2>&1'
+EOF
+cat > /etc/systemd/system/sound-detector-update.path <<EOF
+[Unit]
+Description=Watch for an update request from the custom-sound-detector web UI
+
+[Path]
+PathExists=$DATA_DIR/update-request
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Which commit is installed, for the web UI (it can't run git in a checkout it doesn't own).
+printf '{"commit": "%s", "date": "%s", "repo": "%s", "branch": "%s"}\n' \
+  "$(git -C "$APP_DIR" rev-parse HEAD)" "$(git -C "$APP_DIR" log -1 --format=%cI)" \
+  "$(git -C "$APP_DIR" remote get-url origin)" "$(git -C "$APP_DIR" rev-parse --abbrev-ref HEAD)" \
+  > "$CONF_DIR/installed.json"
+chown root:"$SVC_USER" "$CONF_DIR/installed.json"
+chmod 0640 "$CONF_DIR/installed.json"
+
 systemctl daemon-reload
 systemctl enable --quiet sound-detector
+systemctl enable --quiet --now sound-detector-update.path
 systemctl restart sound-detector
 msg "Running: web UI on port 8080. Logs: journalctl -u sound-detector -f"
 msg "Done: version $("$APP_DIR/venv/bin/python" -c 'import sounddetector; print(sounddetector.__version__)')"

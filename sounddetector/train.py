@@ -312,8 +312,8 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
     return report
 
 
-def rescore(store: ClipStore, yamnet, models: dict, progress=None) -> int:
-    """Recompute every clip's model scores (after training)."""
+def rescore(store: ClipStore, yamnet, models: dict, progress=None, suggester=None) -> int:
+    """Recompute every clip's model scores and label suggestions (after training)."""
     say = progress or (lambda msg: log.info(msg))
     from .app import model_outputs
 
@@ -321,7 +321,7 @@ def rescore(store: ClipStore, yamnet, models: dict, progress=None) -> int:
     for meta in store.all():
         try:
             feats = clip_features(store, yamnet, meta["id"])
-            store.update(meta["id"], **model_outputs(models, feats, store.samples(meta["id"])))
+            store.update(meta["id"], **model_outputs(models, feats, store.samples(meta["id"]), suggester))
             n += 1
         except (OSError, ValueError, KeyError):
             continue

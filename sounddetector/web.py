@@ -28,6 +28,8 @@ log = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "static"
 MAX_UPLOAD = 200 * 1024 * 1024
 # What a backup holds, under the data directory. settings.yaml is left out: it holds passwords.
+# Installed by proxmox/install.sh: runs `update` as root when the UI writes the request file.
+UPDATE_UNIT = Path("/etc/systemd/system/sound-detector-update.path")
 BACKUP_PARTS = ("clips", "models", "reports", "categories.json", "events_per_day.json", "yamnet.tflite")
 
 
@@ -95,12 +97,21 @@ class Server:
         det = self.cfg["detection"]
         return load_targets(self.cfg["data_dir"], det["targets"], self.yamnet().sha256, det.get("thresholds"))
 
+    def suggester(self):
+        if self.app:
+            return self.app.suggester
+        from .suggest import Suggester
+
+        return Suggester.load(self.cfg["data_dir"], self.yamnet().sha256)
+
     # ---- API -----------------------------------------------------------------------------
     def status(self) -> dict:
         reports = {}
         for p in (Path(self.cfg["data_dir"]) / "reports").glob("*.json"):
             try:
                 r = json.loads(p.read_text())
+                if "target" not in r:  # the label suggestions' report
+                    continue
                 reports[r["target"]] = {k: r[k] for k in ("trained_at", "threshold", "cv", "clips",
                                                           "positive_clips", "negative_clips")}
             except (OSError, ValueError, KeyError):
@@ -115,6 +126,78 @@ class Server:
             "reports": reports,
             "job": self.jobs.state(),
         }
+
+    # ---- software update -----------------------------------------------------------------
+    def _installed(self) -> dict | None:
+        conf = self.cfg.get("_config_path")
+        if not conf:
+            return None
+        try:
+            return json.loads((Path(conf).parent / "installed.json").read_text())
+        except (OSError, ValueError):
+            return None
+
+    def _latest(self, installed: dict) -> dict | None:
+        """The newest commit on the installed branch, and what changed since (cached 5 minutes)."""
+        import re
+        import subprocess
+        import urllib.request
+
+        key = (installed.get("repo"), installed.get("branch"), installed.get("commit"))
+        cached = getattr(self, "_latest_cache", None)
+        if cached and cached[0] == key and time.time() - cached[1] < 300:
+            return cached[2]
+        out = None
+        try:
+            proc = subprocess.run(["git", "ls-remote", key[0], f"refs/heads/{key[1]}"], capture_output=True,
+                                  text=True, timeout=20, check=False)
+            if proc.returncode == 0 and proc.stdout.split():
+                out = {"commit": proc.stdout.split()[0], "changes": None}
+        except (OSError, subprocess.SubprocessError):
+            pass
+        m = re.match(r"https://github\.com/([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", key[0] or "")
+        if out and m and out["commit"] != key[2]:
+            try:  # what changed, from GitHub (best effort)
+                url = f"https://api.github.com/repos/{m[1]}/{m[2]}/compare/{key[2]}...{out['commit']}"
+                req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
+                                                           "User-Agent": "custom-sound-detector"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read())
+                out["changes"] = [c["commit"]["message"].splitlines()[0] for c in data.get("commits", [])][-30:]
+            except (OSError, ValueError, KeyError):
+                pass
+        self._latest_cache = (key, time.time(), out)
+        return out
+
+    def software(self) -> dict:
+        root = Path(self.cfg["data_dir"])
+        installed = self._installed()
+        log_path = root / "update.log"
+        try:
+            tail = log_path.read_text(errors="replace").splitlines()[-40:]
+            log_time = log_path.stat().st_mtime
+        except OSError:
+            tail, log_time = [], None
+        return {
+            "version": __version__,
+            "can_update": UPDATE_UNIT.exists() and installed is not None,
+            "installed": installed,
+            "latest": self._latest(installed) if installed and installed.get("repo") else None,
+            "requested": (root / "update-request").exists(),
+            "log": tail,
+            "log_time": log_time,
+        }
+
+    def request_update(self) -> dict:
+        """Ask the root update unit to update and restart the service."""
+        if not (UPDATE_UNIT.exists() and self._installed()):
+            raise ValueError("updating from the web UI needs an install made by install.sh (run `update` once)")
+        if self.jobs.running:
+            raise ValueError(f"wait for the running job ({self.jobs.running}) to finish")
+        (Path(self.cfg["data_dir"]) / "update-request").write_text(time.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n")
+        log.info("update requested from the web UI")
+        self._latest_cache = None
+        return {"requested": True}
 
     def export_backup(self, out) -> dict:
         """Write a .tar.gz of the dataset (clips and labels), models with their history, and reports."""
@@ -161,6 +244,8 @@ class Server:
             clips = [c for c in clips if needle in c["id"].lower() or needle in (c.get("imported_from") or "").lower()]
         if q.get("day"):
             clips = [c for c in clips if c.get("day") == q["day"]]
+        if q.get("suggested"):  # the label suggestions' first choice
+            clips = [c for c in clips if (c.get("label_suggestions") or [[None]])[0][0] == q["suggested"]]
         if q.get("ids"):
             wanted = set(q["ids"].split(","))
             clips = [c for c in clips if c["id"] in wanted]
@@ -170,6 +255,8 @@ class Server:
             clips.sort(key=lambda c: c["recorded_at"])
         elif sort == "score":
             clips.sort(key=lambda c: -(c.get("scores") or {}).get(target, -1))
+        elif sort == "suggestion":  # most confident suggestion first
+            clips.sort(key=lambda c: -((c.get("label_suggestions") or [[None, -1]])[0][1]))
         elif sort == "loudest":
             clips.sort(key=lambda c: -(c.get("peak_dbfs") or -120))
         else:
@@ -200,7 +287,7 @@ class Server:
             peak = round(max(rms_dbfs(f) for f in frames), 1) if len(frames) else None
             spans = [(0, end, 0, peak, None)]
         saved = []
-        models = self.models()
+        models, suggester = self.models(), self.suggester()
         with self._yamnet_lock:
             yam = self.yamnet()
             from .app import describe_clip
@@ -215,7 +302,8 @@ class Server:
                 if label:
                     self.store.set_label(clip["id"], label)
                 feats = clip_features(self.store, yam, clip["id"])
-                saved.append(self.store.update(clip["id"], **describe_clip(yam, models, feats, samples[start:end])))
+                saved.append(self.store.update(clip["id"], **describe_clip(yam, models, feats, samples[start:end],
+                                                                               suggester)))
         return {"saved": len(saved), "clips": saved}
 
     def split_clip(self, clip_id: str, at) -> dict:
@@ -225,7 +313,7 @@ class Server:
         except (TypeError, ValueError):
             raise ValueError("at must be seconds") from None
         parts = self.store.split(clip_id, at)
-        models = self.models()
+        models, suggester = self.models(), self.suggester()
         with self._yamnet_lock:
             yam = self.yamnet()
             from .app import describe_clip
@@ -235,7 +323,7 @@ class Server:
             for part in parts:
                 feats = clip_features(self.store, yam, part["id"])
                 out.append(self.store.update(part["id"], **describe_clip(yam, models, feats,
-                                                                         self.store.samples(part["id"]))))
+                                                                         self.store.samples(part["id"]), suggester)))
         return {"parts": out}
 
     def settings(self) -> dict:
@@ -286,16 +374,21 @@ class Server:
 
         def job(say):
             from .classifier import load_targets
+            from .suggest import Suggester, train_suggester
             from .train import options, rescore, train
 
             with self._yamnet_lock:
                 yam = self.yamnet()
                 train(self.store, yam, target, self.cfg["data_dir"], progress=say, **options(self.cfg))
+                say("training the label suggestions")
+                train_suggester(self.store, yam, self.cfg["data_dir"], C=float(self.cfg["training"]["C"]),
+                                progress=say)
                 det = self.cfg["detection"]
                 targets = sorted(set(det["targets"]) | {target})
                 models = load_targets(self.cfg["data_dir"], targets, yam.sha256, det.get("thresholds"))
-                say("rescoring all clips with the new model")
-                rescore(self.store, yam, models, progress=say)
+                say("rescoring all clips with the new models")
+                rescore(self.store, yam, models, progress=say,
+                        suggester=Suggester.load(self.cfg["data_dir"], yam.sha256))
             if self.app:
                 self.app.reload_models(force=True)
             if target not in self.cfg["detection"]["targets"]:
@@ -396,6 +489,8 @@ class Server:
                         from .logbuffer import HANDLER
 
                         self._json({"lines": HANDLER.since(int(q.get("after", 0)), int(q.get("limit", 500)))})
+                    elif parts == ["api", "update"]:
+                        self._json(server.software())
                     elif parts == ["api", "export"]:
                         self._send_backup()
                     elif parts == ["api", "report"]:
@@ -450,6 +545,8 @@ class Server:
                         self._json(server.save_settings(data))
                     elif len(parts) == 3 and parts[:2] == ["api", "test"]:
                         self._json(server.run_test(parts[2], data))
+                    elif parts == ["api", "update"]:
+                        self._json(server.request_update())
                     elif parts == ["api", "train"]:
                         started = server.start_training(data.get("target", KNOCK))
                         self._json({"started": started, "job": server.jobs.state()}, 200 if started else 409)
