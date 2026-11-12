@@ -24,6 +24,7 @@ from .config import DEFAULT_CATEGORIES, KNOCK, NOT_KNOCK, UNSURE, valid_label
 log = logging.getLogger(__name__)
 
 ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
+MIN_PART = 0.3  # seconds: the shortest part a clip can be split into
 
 
 def _now_iso() -> str:
@@ -164,6 +165,66 @@ class ClipStore:
             for p in [wav, meta, *wav.parent.glob(f"{clip_id}.emb*.npz")]:
                 p.unlink(missing_ok=True)
             del self._index[clip_id]
+
+    # ---- splitting a clip that holds more than one sound --------------------------------
+    @property
+    def _split_dir(self) -> Path:
+        return self.root / "split"  # originals of split clips, so a split can be undone
+
+    def split(self, clip_id: str, at: float) -> list[dict]:
+        """Cut a clip in two at `at` seconds. The parts are new, unlabeled clips; the original
+        is moved aside (not deleted) so unsplit() can bring it back."""
+        with self._lock:
+            meta = self.get(clip_id)
+            samples = self.samples(clip_id)
+            cut = int(round(float(at) * SAMPLE_RATE))
+            if not (MIN_PART * SAMPLE_RATE <= cut <= len(samples) - MIN_PART * SAMPLE_RATE):
+                raise ValueError(f"each part must be at least {MIN_PART} s long")
+            recorded = datetime.fromisoformat(meta["recorded_at"]).timestamp()
+            parts = []
+            for a, b in ((0, cut), (cut, len(samples))):
+                offset = a / SAMPLE_RATE
+                part = {"source": meta.get("source", "clip"), "recorded_at": recorded + offset,
+                        "split_from": clip_id, "split_offset": round(offset, 2),
+                        "detections": [{**d, "offset": round(d["offset"] - offset, 2)}
+                                       for d in meta.get("detections") or []
+                                       if a / SAMPLE_RATE <= d.get("offset", -1) < b / SAMPLE_RATE]}
+                if meta.get("imported_from"):
+                    part["imported_from"] = meta["imported_from"]
+                    part["import_offset"] = round(float(meta.get("import_offset") or 0) + offset, 2)
+                parts.append(self.save(samples[a:b], part, enforce_rate=False))
+            wav, meta_path = self._paths(clip_id)
+            dest = self._split_dir / meta["day"]
+            dest.mkdir(parents=True, exist_ok=True)
+            wav.replace(dest / wav.name)
+            meta_path.replace(dest / meta_path.name)
+            for p in wav.parent.glob(f"{clip_id}.emb*.npz"):
+                p.unlink(missing_ok=True)
+            del self._index[clip_id]
+            return parts
+
+    def unsplit(self, clip_id: str) -> dict:
+        """Undo split(): bring the original back and remove its parts."""
+        if not ID_RE.match(clip_id):
+            raise KeyError(clip_id)
+        with self._lock:
+            found = list(self._split_dir.glob(f"*/{clip_id}.json"))
+            if not found:
+                raise KeyError(clip_id)
+            meta_path = found[0]
+            meta = json.loads(meta_path.read_text())
+            for other in self._split_dir.glob("*/*.json"):
+                if json.loads(other.read_text()).get("split_from") == clip_id:
+                    raise ValueError("a part of this clip was split again: undo that split first")
+            parts = [m["id"] for m in self._index.values() if m.get("split_from") == clip_id]
+            day_dir = self.clips_dir / meta["day"]
+            day_dir.mkdir(parents=True, exist_ok=True)
+            meta_path.with_suffix(".wav").replace(day_dir / f"{clip_id}.wav")
+            meta_path.replace(day_dir / f"{clip_id}.json")
+            self._index[clip_id] = meta
+            for part in parts:
+                self.delete(part)
+            return dict(meta)
 
     # ---- categories --------------------------------------------------------------------
     @property

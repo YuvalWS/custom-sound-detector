@@ -15,7 +15,7 @@ from .audio import LiveSource
 from .classifier import load_targets, model_path
 from .config import stream_url
 from .events import Event, Segmenter
-from .features import clip_features, event_windows, suggest_span
+from .features import clip_features, event_windows, suggest_span, sustained_score
 from .store import ClipStore
 from .yamnet import WINDOW, YamNet
 
@@ -54,6 +54,7 @@ class TargetState:
         self.hits: deque[float] = deque()
         self.last_hit = -1e9
         self.last_score = 0.0
+        self.run_start: float | None = None  # when the scores went above the threshold
 
 
 def model_outputs(models: dict, feats: dict, samples: np.ndarray) -> dict:
@@ -62,7 +63,7 @@ def model_outputs(models: dict, feats: dict, samples: np.ndarray) -> dict:
     scores, spans = {}, {}
     for t, m in models.items():
         p = m.predict(emb)
-        scores[t] = round(float(p.max()), 3)
+        scores[t] = round(sustained_score(p, feats["starts"], m.sustain), 3)
         span = suggest_span(p, feats["starts"], samples)
         if span:
             spans[t] = span
@@ -170,7 +171,8 @@ class App:
         self.connected = False
         self.segmenter.reset()
         self.segmenter.pos = self.ring.pos
-        for target in list(self.states):
+        for target, st in list(self.states.items()):
+            st.run_start = None
             self._set_state(target, False)
 
     def process(self, chunk: np.ndarray) -> None:
@@ -194,6 +196,8 @@ class App:
         self._since_hop %= hop
         seg = self.segmenter
         if not (seg.active or self.ring.pos - seg.last_active < WINDOW) or self.ring.pos < WINDOW:
+            for st in self.states.values():  # a run of scores never spans a pause in scoring
+                st.run_start = None
             return
         window = self.ring.get(self.ring.pos - WINDOW, self.ring.pos)
         emb, _ = self.yamnet.window(window)
@@ -203,6 +207,12 @@ class App:
             p = float(model.predict(emb)[0])
             st = self.states[target]
             if p < model.threshold:
+                st.run_start = None
+                continue
+            if st.run_start is None:
+                st.run_start = now
+            # A hit once the score has stayed above the threshold for the model's sustain time.
+            if now - st.run_start < model.sustain - 1e-6:
                 continue
             st.last_score = p
             st.last_hit = now
@@ -274,7 +284,7 @@ class App:
             "collecting": bool(self.cfg["collection"]["enabled"]),
             "events_seen": self.events_seen,
             "uptime_s": int(time.time() - self.started),
-            "models": {t: {"threshold": m.threshold, "trained_at": m.trained_at, "on": self.states[t].on}
-                       for t, m in self.models.items()},
+            "models": {t: {"threshold": m.threshold, "sustain": m.sustain, "trained_at": m.trained_at,
+                           "on": self.states[t].on} for t, m in self.models.items()},
             "yamnet": Path(self.yamnet.path).name,
         }

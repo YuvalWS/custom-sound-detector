@@ -64,6 +64,8 @@ canvas.spec { display: block; width: 100%; height: 180px; image-rendering: auto;
 .mark.drafting { border-color: #ffffffb0; box-shadow: none; }
 .mark.suggested { border-style: dashed; border-color: #ffd166; background: #ffd16614; box-shadow: none; }
 .mark-note { position: absolute; top: 4px; right: 8px; font-size: 11px; color: #ffd166; pointer-events: none; }
+.cut { position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px solid #ff6b8a; pointer-events: none; }
+.cut::after { content: "✂"; position: absolute; top: 2px; left: 3px; color: #ff6b8a; font-size: 12px; }
 .onset { position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px dashed #ffd166; opacity: .8; pointer-events: none; }
 .freq { position: absolute; left: 6px; font-size: 11px; color: #ffffffb0; pointer-events: none; }
 .meta-line { display: flex; gap: 14px; flex-wrap: wrap; font-size: 14px; }
@@ -142,11 +144,12 @@ a { color: var(--accent); cursor: pointer; }
     <div id="clip-body">
       <div class="meta-line" id="clip-meta"></div>
       <div class="chips" id="clip-hints" style="margin-top:8px"></div>
-      <div class="spec-wrap" id="spec-wrap" title="Click to play from here; drag to mark the part the label is about">
+      <div class="spec-wrap" id="spec-wrap" title="Click to play from here (and set where Split cuts); drag to mark the part the label is about">
         <canvas class="spec" id="spec"></canvas>
         <div class="mark hidden" id="mark"></div>
         <span class="mark-note hidden" id="mark-note">suggested by the knock model: K accepts it, drag to change</span>
         <div class="onset" id="onset"></div>
+        <div class="cut hidden" id="cut"></div>
         <div class="playhead" id="playhead"></div>
         <span class="freq" style="top:4px">8 kHz</span>
         <span class="freq" style="bottom:4px">0</span>
@@ -157,6 +160,7 @@ a { color: var(--accent); cursor: pointer; }
         <button class="btn" id="next">Skip →<kbd>→</kbd></button>
         <button class="btn hidden" id="play-mark">▶ Marked part<kbd>M</kbd></button>
         <button class="btn hidden" id="clear-mark">Clear mark<kbd>C</kbd></button>
+        <button class="btn" id="split" title="Cut the clip in two where you last clicked on the spectrogram, to label each sound on its own">✂ Split here<kbd>S</kbd></button>
         <span class="spacer"></span>
         <button class="btn" id="undo" disabled>Undo<kbd>Z</kbd></button>
       </div>
@@ -174,7 +178,7 @@ a { color: var(--accent); cursor: pointer; }
       </div>
     </div>
   </div>
-  <p class="small muted">A clip with a knock in it is a knock, even if there is talking too. If other sounds take up much of the clip, drag across the knock on the spectrogram first: training then learns only from the marked part. "Unsure" clips are kept but never used for training.</p>
+  <p class="small muted">A clip with a knock in it is a knock, even if there is talking too. If other sounds take up much of the clip, drag across the knock on the spectrogram first: training then learns only from the marked part. When a clip holds two different sounds, like a beep and then a knock, click between them and press S to split it, then label each part. "Unsure" clips are kept but never used for training.</p>
 </section>
 
 <section id="tab-browse" class="hidden">
@@ -420,7 +424,8 @@ async function showClip() {
   for (const d of clip.detections || []) best[d.target] = Math.max(best[d.target] || 0, d.score);
   const det = Object.keys(best).length ? `<span class="chip" style="background:var(--accent);color:var(--accent-text)">detected: ${esc(Object.entries(best).map(([t, sc]) => `${pretty(t)} ${sc.toFixed(2)}`).join(", "))}</span>` : "";
   const score = clip.scores && clip.scores.knock !== undefined ? `<span>knock score <span class="scorebar"><i style="width:${Math.round(clip.scores.knock * 100)}%"></i></span> ${clip.scores.knock.toFixed(2)}</span>` : "";
-  const src = clip.imported_from ? `<span class="muted">from ${esc(clip.imported_from)}${clip.import_offset != null ? ` at ${clip.import_offset} s` : ""}</span>` : "";
+  const src = clip.imported_from ? `<span class="muted">from ${esc(clip.imported_from)}${clip.import_offset != null ? ` at ${clip.import_offset} s` : ""}</span>` :
+    clip.split_from ? `<span class="muted">split from ${esc(clip.split_from)} at ${clip.split_offset} s</span>` : "";
   const cv = clip.cv_score != null ? `<span class="chip" title="Score when the model had not seen this clip (cross-validation)">cross-validated ${clip.cv_score.toFixed(2)}</span>` : "";
   $("clip-meta").innerHTML = `<b>${esc(fmtTime(clip.recorded_at))}</b><span class="muted">${clip.duration}s</span>` +
     (clip.peak_dbfs != null ? `<span class="muted">peak ${clip.peak_dbfs} dBFS</span>` : "") + score + src +
@@ -433,6 +438,7 @@ async function showClip() {
   onset.style.display = clip.onset ? "" : "none";
   onset.style.left = `${(clip.onset / clip.duration) * 100}%`;
   $("playhead").style.left = "0";
+  state.cutAt = null; drawCut();
   drawMark();
   try {
     const { buf, samples } = await loadAudio(clip.id);
@@ -461,9 +467,38 @@ async function applyLabel(label) {
     showClip(); refreshStatus();
   } catch (e) { toast(e.message); }
 }
+function drawCut() {
+  const clip = state.current, at = state.cutAt;
+  $("cut").classList.toggle("hidden", !(clip && at > 0));
+  if (clip && at > 0) $("cut").style.left = `${(at / clip.duration) * 100}%`;
+}
+async function splitCurrent() {
+  const clip = state.current; if (!clip || splitCurrent.busy) return;
+  const at = state.cutAt > 0 ? state.cutAt : audio.currentTime;
+  if (!(at > 0)) { toast("Click the spectrogram where one sound ends and the next begins, then split"); return; }
+  splitCurrent.busy = true; $("split").disabled = true; toast("Splitting…");
+  try {
+    const { parts } = await post(`/api/clips/${encodeURIComponent(clip.id)}/split`, { at: Math.round(at * 100) / 100 });
+    state.undo.push({ split: true, clip: { ...clip }, index: state.i, parts: parts.map((p) => p.id) });
+    $("undo").disabled = false;
+    state.queue.splice(state.i, 1, ...parts);
+    toast(`Split at ${at.toFixed(2)} s: label each part`);
+    showClip(); refreshStatus();
+  } catch (e) { toast(e.message); } finally { splitCurrent.busy = false; $("split").disabled = false; }
+}
+$("split").onclick = splitCurrent;
 async function undo() {
   const u = state.undo.pop(); if (!u) return;
   $("undo").disabled = !state.undo.length;
+  if (u.split) {
+    try {
+      const restored = await post(`/api/clips/${encodeURIComponent(u.clip.id)}/unsplit`);
+      state.queue = state.queue.filter((c) => !u.parts.includes(c.id));
+      state.queue.splice(Math.min(u.index, state.queue.length), 0, { ...u.clip, ...restored });
+      state.i = Math.min(u.index, state.queue.length - 1); showClip(); refreshStatus(); toast("Split undone");
+    } catch (e) { toast(e.message); }
+    return;
+  }
   try {
     if (u.acceptedSpan) await post(`/api/clips/${encodeURIComponent(u.clip.id)}/span`, { span: null });
     const restored = await post(`/api/clips/${encodeURIComponent(u.clip.id)}/label`, { label: u.prev });
@@ -543,6 +578,7 @@ $("spec-wrap").addEventListener("pointerup", (e) => {
   if (!markStart) return;
   const { t, dragging } = markStart; markStart = null;
   if (dragging) { const u = specTime(e); saveSpan([Math.min(t, u), Math.max(t, u)]); return; }
+  state.cutAt = t; drawCut();
   playMarked.run = (playMarked.run || 0) + 1;
   if (audio.duration) { audio.currentTime = (t / state.current.duration) * audio.duration; audio.play().catch(() => {}); }
 });
@@ -581,6 +617,7 @@ document.addEventListener("keydown", (e) => {
   else if (k === "z") undo();
   else if (k === "c") { if (state.current?.span) saveSpan(null); }
   else if (k === "m") playMarked();
+  else if (k === "s") splitCurrent();
   else if (k === "delete" || k === "backspace") deleteCurrent();
   else if (k === "arrowleft") $("prev").click();
   else if (k === "arrowright") $("next").click();
@@ -671,7 +708,7 @@ async function loadReport() {
     <div class="row" style="margin-bottom:12px"><b>Model for "${esc(pretty(target))}"</b><span class="muted small">trained ${esc(fmtTime(r.trained_at))}</span></div>
     <div class="cards">
       <div class="card"><div class="muted small">Clips used</div><div class="v">${r.clips}</div><div class="small muted">${r.positive_clips} ${esc(pretty(target).toLowerCase())}, ${r.negative_clips} other</div></div>
-      <div class="card"><div class="muted small">Threshold</div><div class="v">${r.threshold.toFixed(2)}</div><div class="small muted">${rule.budget_per_week !== undefined ? `lowest within ${rule.budget_per_week} false alarm${rule.budget_per_week === 1 ? "" : "s"}/week` : esc(rule.note || "")}</div></div>
+      <div class="card"><div class="muted small">Threshold</div><div class="v">${r.threshold.toFixed(2)}</div><div class="small muted">${r.sustain ? `held for ${r.sustain.toFixed(1)} s, ` : ""}${rule.budget_per_week !== undefined ? `lowest within ${rule.budget_per_week} false alarm${rule.budget_per_week === 1 ? "" : "s"}/week` : esc(rule.note || "")}</div></div>
       <div class="card"><div class="muted small">Found (recall)</div><div class="v">${Math.round(cv.recall * 100)}%</div><div class="small muted">${cv.true_positives} found, ${cv.missed} missed</div></div>
       <div class="card"><div class="muted small">False alarms (estimate)</div><div class="v">${rule.estimated_per_week !== undefined ? `≈ ${rule.estimated_per_week}/week` : "?"}</div><div class="small muted">${rule.events_per_day ? `${rule.above_threshold} of ${rule.everyday_sounds} labeled sounds, ~${Math.round(rule.events_per_day)} sounds/day` : "needs a full day of listening"}</div></div>
     </div>

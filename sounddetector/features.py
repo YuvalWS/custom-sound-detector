@@ -35,6 +35,33 @@ def event_windows(levels: np.ndarray, within_db: float = 10.0) -> np.ndarray:
     return np.flatnonzero(levels >= levels.max() - within_db)
 
 
+SUSTAIN_OPTIONS = (0.0, 0.2, 0.4, 0.6, 0.8)  # seconds; training picks the one that does best
+
+
+def sustained_score(probs: np.ndarray, starts: np.ndarray, sustain: float = 0.0) -> float:
+    """A clip's score: the highest level the window scores stay at for `sustain` seconds.
+
+    With sustain 0 it is the best single window. A knock is a series of hits, so its score
+    stays high across many overlapping windows; one click scores high in fewer. A clip
+    passes a threshold when windows whose starts span `sustain` seconds all pass it, the
+    same rule the live detector uses. A clip too short to hold that run is scored as a whole.
+    """
+    p = np.asarray(probs, dtype=np.float64)
+    if not len(p):
+        return 0.0
+    if sustain <= 0:
+        return float(p.max())
+    t = np.asarray(starts, dtype=np.float64)
+    ends = np.searchsorted(t, t + sustain - 1e-6)  # first window at least `sustain` after each
+    best = None
+    for i, k in enumerate(ends):
+        if k >= len(p):
+            break
+        level = float(p[i:k + 1].min())
+        best = level if best is None else max(best, level)
+    return float(p.min()) if best is None else best
+
+
 def suggest_span(probs: np.ndarray, starts: np.ndarray, samples: np.ndarray, floor: float = 0.5):
     """Where in the clip a model hears its sound, as [start, end] seconds, or None.
 

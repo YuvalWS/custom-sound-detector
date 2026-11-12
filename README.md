@@ -168,7 +168,14 @@ A good first dataset:
 - Positives are clips labeled with the target. Negatives are all other labeled clips,
   `not_knock` and every category. `unsure` and unlabeled clips are left out.
 - Evaluation is 5-fold cross-validation by clip: the numbers come from clips the model did
-  not see. A clip's score is its best window, the same as the live detector sees it.
+  not see. Every window of a held-out clip is scored, as the live detector hears it.
+- **A knock must last.** A clip's score is the level its window scores stay at for a
+  *sustain* time (0 to 0.8 s): a knock is a series of hits that keeps the score high, while
+  one click or clack scores high only briefly. Training tries each sustain time and keeps
+  the one that finds the most knocks within the false-alarm budget; the live detector then
+  needs the score above the threshold for that long before it reports a knock.
+- A clip with two sounds (a beep, then a knock) can be split in the Label tab: click
+  between them and press S, then label each part. Undo puts the clip back.
 - **The threshold is set by false alarms, not by precision.** Precision on your labels depends
   on how many knocks you recorded on purpose, so it says little about real life. Instead,
   the share of labeled everyday sounds that would alarm, times how many sounds a day the

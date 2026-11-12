@@ -23,6 +23,8 @@ class TargetModel:
         self.coef = np.asarray(data["coef"], dtype=np.float32)
         self.intercept = float(data["intercept"])
         self.threshold = float(data["threshold"])
+        # Seconds the score must stay above the threshold (0 for models trained before it).
+        self.sustain = float(data.get("sustain", 0.0))
         self.yamnet_sha256: str = data.get("yamnet_sha256", "")
         self.trained_at: str = data.get("trained_at", "")
 

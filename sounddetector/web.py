@@ -218,6 +218,26 @@ class Server:
                 saved.append(self.store.update(clip["id"], **describe_clip(yam, models, feats, samples[start:end])))
         return {"saved": len(saved), "clips": saved}
 
+    def split_clip(self, clip_id: str, at) -> dict:
+        """Split a clip at `at` seconds; each part gets its hints, scores and suggested mark."""
+        try:
+            at = float(at)
+        except (TypeError, ValueError):
+            raise ValueError("at must be seconds") from None
+        parts = self.store.split(clip_id, at)
+        models = self.models()
+        with self._yamnet_lock:
+            yam = self.yamnet()
+            from .app import describe_clip
+            from .features import clip_features
+
+            out = []
+            for part in parts:
+                feats = clip_features(self.store, yam, part["id"])
+                out.append(self.store.update(part["id"], **describe_clip(yam, models, feats,
+                                                                         self.store.samples(part["id"]))))
+        return {"parts": out}
+
     def settings(self) -> dict:
         from .config import editable_view, load
 
@@ -410,6 +430,10 @@ class Server:
                         self._json(server.store.set_label(parts[2], data.get("label") or None, data.get("note")))
                     elif len(parts) == 4 and parts[:2] == ["api", "clips"] and parts[3] == "span":
                         self._json(server.store.set_span(parts[2], data.get("span")))
+                    elif len(parts) == 4 and parts[:2] == ["api", "clips"] and parts[3] == "split":
+                        self._json(server.split_clip(parts[2], data.get("at")))
+                    elif len(parts) == 4 and parts[:2] == ["api", "clips"] and parts[3] == "unsplit":
+                        self._json(server.store.unsplit(parts[2]))
                     elif len(parts) == 4 and parts[:2] == ["api", "clips"] and parts[3] == "delete":
                         server.store.delete(parts[2])
                         self._json({"ok": True})

@@ -70,8 +70,9 @@ DEFAULTS: dict = {
     },
     "detection": {
         "enabled": True,
-        # Seconds between classifier runs while a sound event is active.
-        "hop": 0.25,
+        # Seconds between classifier runs while a sound event is active. 0.1 matches training,
+        # which scores clips the same way (a run of windows that stays above the threshold).
+        "hop": 0.1,
         # Seconds without a hit before the MQTT state returns to OFF.
         "off_delay": 10.0,
         # Hits needed (within off_delay) before the state turns ON.

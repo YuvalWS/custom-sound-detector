@@ -168,12 +168,18 @@ def test_training_report_and_model(tmp_path):
     assert report["threshold"] > top_negative or report["threshold"] == 0.99
     labels = {row["label"] for row in report["categories"]}
     assert labels == {"knock", "doorbell_chime", "not_knock"}
+    # Training tried each sustain length and kept one; the model carries it to the detector.
+    from sounddetector.features import SUSTAIN_OPTIONS
+
+    assert [o["sustain"] for o in report["sustain_options"]] == list(SUSTAIN_OPTIONS)
+    assert report["sustain"] in SUSTAIN_OPTIONS
     models = load_targets(tmp_path, ["knock"], FakeYamNet.sha256)
     assert set(models) == {"knock"}
     # A model trained on other features is refused.
     assert load_targets(tmp_path, ["knock"], "0" * 64) == {}
     # Each model lists its training set, with the labels the clips had then.
     data = json.loads((tmp_path / "models" / "knock.json").read_text())
+    assert data["sustain"] == report["sustain"]
     assert len(data["training_set"]) == 20 and {lab for _, lab in data["training_set"]} == {
         "knock", "doorbell_chime", "not_knock"}
     # Retraining keeps the previous model and its report.
@@ -391,3 +397,87 @@ def test_model_suggests_where_the_knock_is():
     span = suggest_span(probs, starts, audio)
     assert span[0] <= 3.6 <= span[1] and span[1] - span[0] < 1.0
     assert suggest_span(np.full(len(starts), 0.2), starts, audio) is None
+
+
+def test_sustained_score_needs_a_run_of_windows():
+    from sounddetector.features import sustained_score
+
+    starts = np.arange(0, 3.0, 0.1)
+    click = np.full(len(starts), 0.01)
+    click[10:13] = 0.999  # one short sound: high in a few windows
+    series = np.full(len(starts), 0.01)
+    series[10:20] = [0.99, 0.97, 0.995, 0.98, 0.99, 0.999, 0.96, 0.99, 0.98, 0.97]  # a knock series
+    assert sustained_score(click, starts, 0.0) == pytest.approx(0.999)
+    assert sustained_score(click, starts, 0.4) == pytest.approx(0.01)
+    assert sustained_score(series, starts, 0.4) == pytest.approx(0.97)
+    assert sustained_score(series, starts, 0.8) == pytest.approx(0.96)
+    # A clip too short for the run is scored as a whole.
+    assert sustained_score(np.array([0.9, 0.95]), np.array([0.0, 0.1]), 0.4) == pytest.approx(0.9)
+
+
+def test_live_detector_waits_for_the_sustain_time():
+    from sounddetector.app import App, TargetState
+
+    class Seg:
+        active, last_active = True, 0
+
+    class Yam:
+        def __init__(self):
+            self.p = 0.0
+
+        def window(self, samples):
+            return np.array([self.p], dtype=np.float32), None
+
+    class Model:
+        threshold, sustain = 0.9, 0.4
+
+        def predict(self, emb):
+            return np.asarray(emb, dtype=np.float64)
+
+    app = object.__new__(App)
+    app.cfg = {"detection": {"hop": 0.1, "off_delay": 10.0, "min_hits": 1}}
+    app.models, app.states = {"knock": Model()}, {"knock": TargetState()}
+    app.ring, app.segmenter, app.yamnet = Ring(30), Seg(), Yam()
+    app._since_hop, app._hits, app.publisher = 0, __import__("collections").deque(maxlen=200), None
+    step = np.zeros(int(0.1 * SAMPLE_RATE), dtype=np.int16)
+
+    def feed(p, n):
+        app.yamnet.p = p
+        for _ in range(n):
+            app.ring.append(step)
+            app._detect(len(step))
+
+    feed(0.0, 12)
+    feed(0.99, 3)  # a click: 0.2 s above the threshold
+    feed(0.0, 2)
+    assert not app.states["knock"].on and not app._hits
+    feed(0.99, 5)  # a knock series: 0.4 s above it
+    assert app.states["knock"].on and len(app._hits) == 1
+
+
+def test_split_a_clip_and_undo_it(tmp_path):
+    store = ClipStore(tmp_path)
+    audio = knock(chime(noise(4), 0.5), 3.0)
+    clip = store.save(audio, {"source": "import", "imported_from": "door.mp4", "import_offset": 10.0,
+                              "detections": [{"target": "knock", "score": 0.99, "offset": 3.1}]})
+    store.set_label(clip["id"], "doorbell_chime")
+    a, b = store.split(clip["id"], 2.0)
+    assert [p["duration"] for p in (a, b)] == [2.0, 2.0]
+    assert a["label"] is None and b["label"] is None and a["split_from"] == clip["id"]
+    assert (a["import_offset"], b["import_offset"]) == (10.0, 12.0)
+    assert a["detections"] == [] and b["detections"][0]["offset"] == 1.1
+    assert np.array_equal(np.concatenate([store.samples(a["id"]), store.samples(b["id"])]), audio)
+    assert {m["id"] for m in store.all()} == {a["id"], b["id"]}
+    with pytest.raises(ValueError):
+        store.split(a["id"], 0.1)  # parts must be at least MIN_PART long
+    # A part split again must be undone first.
+    store.split(b["id"], 1.0)
+    with pytest.raises(ValueError):
+        store.unsplit(clip["id"])
+    store.unsplit(b["id"])
+    restored = store.unsplit(clip["id"])
+    assert restored["label"] == "doorbell_chime"
+    assert [m["id"] for m in store.all()] == [clip["id"]]
+    assert np.array_equal(store.samples(clip["id"]), audio)
+    # It survives a restart.
+    assert [m["id"] for m in ClipStore(tmp_path).all()] == [clip["id"]]

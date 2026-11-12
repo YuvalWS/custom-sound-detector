@@ -4,8 +4,11 @@ Positives are clips labeled with the target. Negatives are all other labeled cli
 (`not_knock` and every category). `unsure` and unlabeled clips are left out. A clip with a
 marked span (the part the label is about) contributes only the windows inside it.
 
-Evaluation is cross-validated by clip, so windows of one clip never sit on both sides,
-and a clip's score is the max over its windows, the same as the live detector sees it.
+Evaluation is cross-validated by clip, so windows of one clip never sit on both sides.
+It scores every window of a held-out clip, as the live detector hears it, and a clip's score
+is the level its window scores stay at for `sustain` seconds (features.sustained_score).
+Training tries a few sustain lengths and keeps the one that finds the most clips within the
+false-alarm budget; the live detector applies the same rule.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ import numpy as np
 
 from .classifier import TargetModel, model_path
 from .config import NOT_KNOCK, UNSURE
-from .features import clip_features, training_windows
+from .features import SUSTAIN_OPTIONS, clip_features, sustained_score, training_windows
 from .store import ClipStore
 
 log = logging.getLogger(__name__)
@@ -106,7 +109,7 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
 
     say(f"computing features for {len(clips)} labeled clips")
     X, y, groups = [], [], []
-    used = []
+    used, full = [], []  # full: every window of each clip (embeddings, starts), for scoring
     t0 = time.time()
     for i, meta in enumerate(clips):
         try:
@@ -119,6 +122,7 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
         y += [meta["label"] == target] * len(sel)
         groups += [len(used)] * len(sel)
         used.append(meta)
+        full.append((feats["emb"].astype(np.float32), np.asarray(feats["starts"], dtype=np.float64)))
         if (i + 1) % 50 == 0:
             say(f"  {i + 1}/{len(clips)} clips")
     X = np.concatenate(X)
@@ -128,21 +132,36 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
 
     truth = np.array([m["label"] == target for m in used])
     n_splits = int(min(5, truth.sum(), (~truth).sum()))
-    oof = np.zeros(len(used))
+    oof_probs: list = [np.zeros(1)] * len(used)  # held-out window scores of each clip
     if n_splits >= 2:
         say(f"cross-validating ({n_splits} folds)")
         cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=0)
         for tr, te in cv.split(X, y, groups):
             params = _fit(X[tr], y[tr], C)
-            p = _predict(params, X[te])
             for g in np.unique(groups[te]):
-                oof[g] = p[groups[te] == g].max()
+                oof_probs[g] = _predict(params, full[g][0])
     # Every labeled non-target clip counts as an everyday sound, imported ones too: an imported
     # recording that scores high is a false alarm waiting to happen (and errs on the safe side).
     epd = _events_per_day(store)
+    sustain_options = []
     if n_splits >= 2:
-        choice = budget_threshold(oof[~truth], epd, float(false_alarms_per_week))
+        best = None
+        for sustain in SUSTAIN_OPTIONS:
+            scores = np.array([sustained_score(p, full[i][1], sustain) for i, p in enumerate(oof_probs)])
+            c = budget_threshold(scores[~truth], epd, float(false_alarms_per_week))
+            found = int(np.sum(scores[truth] >= c["threshold"]))
+            false = int(np.sum(scores[~truth] >= c["threshold"]))
+            sustain_options.append({"sustain": sustain, "threshold": c["threshold"], "found": found,
+                                    "false_alarms": false})
+            # Within the budget first, then the most found, then the fewest false alarms.
+            key = (c["rule"]["met"], found, -false)
+            if best is None or key > best[0]:
+                best = (key, sustain, scores, c)
+        _, sustain, oof, choice = best
+        say("sustain: " + ", ".join(f"{o['sustain']:.1f}s finds {o['found']}, {o['false_alarms']} false"
+                                    for o in sustain_options) + f"; using {sustain:.1f}s")
     else:
+        sustain, oof = 0.0, np.zeros(len(used))
         choice = {"threshold": 0.5, "rule": {"note": "too few clips to cross-validate"}}
     threshold = choice["threshold"]
 
@@ -183,6 +202,8 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
         "windows": int(len(X)),
         "folds": n_splits,
         "threshold": threshold,
+        "sustain": sustain,
+        "sustain_options": sustain_options,
         "threshold_rule": choice["rule"],
         "cv": {"true_positives": tp, "false_positives": fp, "missed": fn,
                "precision": round(tp / max(1, tp + fp), 3), "recall": round(tp / max(1, tp + fn), 3)},
@@ -195,13 +216,15 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
         "target": target,
         "trained_at": trained_at,
         "threshold": threshold,
+        "sustain": sustain,
         "mean": mean.round(6).tolist(),
         "scale": scale.round(6).tolist(),
         "coef": np.asarray(coef).round(6).tolist(),
         "intercept": b,
         "yamnet_sha256": yamnet.sha256,
         "C": C,
-        "summary": {k: report[k] for k in ("clips", "positive_clips", "negative_clips", "cv", "threshold_rule")},
+        "summary": {k: report[k] for k in ("clips", "positive_clips", "negative_clips", "cv", "sustain",
+                                           "threshold_rule")},
         # Which recordings, with the label each had then: a model stays traceable after a
         # label changes or a clip is deleted.
         "training_set": [[m["id"], m["label"], *([m["span"]] if m.get("span") else [])] for m in used],
@@ -222,7 +245,7 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
     rule = choice["rule"]
     fa = f"about {rule['estimated_per_week']} false alarms a week" if "estimated_per_week" in rule else \
         "false alarm rate unknown until a full day of listening is counted"
-    say(f"saved {path}: threshold {threshold}, finds {round(100 * report['cv']['recall'])}% of "
+    say(f"saved {path}: threshold {threshold} held for {sustain:.1f}s, finds {round(100 * report['cv']['recall'])}% of "
         f"{target} clips, {fa}")
     return report
 
