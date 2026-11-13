@@ -208,7 +208,11 @@ once (a multinomial logistic regression on the same features, labels with at lea
 It suggests a label for every clip: in the Label tab press A to accept the first suggestion
 or click another; in Browse, filter by suggested label (then select all and label them in
 bulk) or sort by how sure it is. The Train tab shows how often it was right on clips it had
-not seen. Detection never uses it. On the first real dataset (614 clips, 9 labels) its first
+not seen. Detection never uses it. "Not a knock" is a catch-all (quiet noise, sounds nobody named,
+and named sounds labeled in bulk), so a second model is trained on the named kinds of sound
+alone; when it is sure (50% or more), its kind is suggested before "Not a knock". To find
+bulk-labeled clips worth naming, filter Browse to "Not a knock" and "Suggested: Door".
+On the first real dataset (614 clips, 9 labels) its first
 suggestion was right 81% of the time, and the right label was in its top three 97%.
 
 The running service picks up a new model within seconds. The previous one is kept in

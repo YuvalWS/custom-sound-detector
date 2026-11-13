@@ -737,6 +737,7 @@ async function loadSuggestReport() {
     <div class="row" style="margin-bottom:8px"><b>Label suggestions</b><span class="muted small">trained ${esc(fmtTime(r.trained_at))}, with every training</span></div>
     <p class="small muted">One model over all your labels, to suggest a label in the Label and Browse tabs (press A to accept it). Detection never uses it.
       On clips it had not seen, its first suggestion was right ${pct(r.top1)} of the time, and the right label was in its top three ${pct(r.top3)}.
+      ${r.kinds ? `Because "Not a knock" also holds named sounds labeled in bulk, a second model names the kind of sound (${esc(r.kinds.classes.map(pretty).join(", "))}); when it is sure, its kind comes before "Not a knock". It named the right kind ${pct(r.kinds.top1)} of the time.` : ""}
       ${r.left_out?.length ? `Labels with fewer than 3 clips are left out: ${esc(r.left_out.map(pretty).join(", "))}.` : ""}</p>
     <table><thead><tr><th>Label</th><th class="num">Clips</th><th class="num">First suggestion right</th><th class="num">In top 3</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }

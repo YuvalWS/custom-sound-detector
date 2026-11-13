@@ -263,7 +263,27 @@ def test_label_suggestions(tmp_path):
         s2.set_label(s2.save(chime(noise(3), 1.0), {"source": "d"}, enforce_rate=False)["id"], "door")
     assert train_suggester(s2, FakeYamNet(), tmp_path / "two")["classes"] == ["door", "knock"]
     s = Suggester.load(tmp_path / "two", FakeYamNet.sha256)
-    assert s.probs(np.zeros((1, 1024))).sum() == pytest.approx(1)
+    assert s.labels.probs(np.zeros((1, 1024))).sum() == pytest.approx(1)
+
+
+def test_a_sure_kind_of_sound_goes_before_not_a_knock():
+    from sounddetector.suggest import Suggester
+
+    def model(classes, bias):  # a model that ignores the sound: its probabilities come from the biases
+        return {"classes": classes, "mean": [0.0], "scale": [1.0], "coef": [[0.0]] * len(classes),
+                "intercept": list(np.log(bias))}
+
+    feats = {"emb": np.zeros((3, 1)), "levels": np.zeros(3)}
+    s = Suggester({**model(["door", "knock", "not_knock"], [0.15, 0.05, 0.8]),
+                   "kinds": model(["door", "voice"], [0.9, 0.1])})
+    assert [c for c, _ in s.suggest(feats)] == ["door", "not_knock", "knock"]
+    assert s.suggest(feats)[0][1] == 0.9  # the kinds model's probability
+    unsure = Suggester({**model(["door", "knock", "not_knock"], [0.15, 0.05, 0.8]),
+                        "kinds": model(["beep", "door", "voice"], [0.25, 0.4, 0.35])})
+    assert [c for c, _ in unsure.suggest(feats)] == ["not_knock", "door", "knock"]
+    knocky = Suggester({**model(["door", "knock", "not_knock"], [0.1, 0.7, 0.2]),
+                        "kinds": model(["door", "voice"], [0.9, 0.1])})
+    assert [c for c, _ in knocky.suggest(feats)] == ["knock", "door", "not_knock"]
 
 
 def test_event_counts_give_events_per_day(tmp_path):
