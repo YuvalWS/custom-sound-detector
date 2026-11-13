@@ -86,7 +86,6 @@ class Publisher:
                 "unique_id": f"{uid}_score",
                 "object_id": f"{uid}_score",
                 "icon": "mdi:waveform",
-                "state_class": "measurement",
                 "state_topic": f"{self.base}/{target}/clip",
                 "value_template": "{{ value_json.score }}",
                 "json_attributes_topic": f"{self.base}/{target}/clip",
