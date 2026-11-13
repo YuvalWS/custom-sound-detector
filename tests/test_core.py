@@ -237,6 +237,45 @@ def test_each_saved_clip_is_published_with_its_score():
     assert info["audio"] == "api/clips/door-20261112-120000-000/audio"
 
 
+def test_score_sensor_is_an_event_log_not_a_statistic():
+    from sounddetector.mqtt import Publisher
+
+    class Client:
+        def __init__(self):
+            self.sent = {}
+
+        def publish(self, topic, payload, retain=False):
+            self.sent[topic] = payload
+
+    pub = object.__new__(Publisher)
+    pub.cfg = {"discovery": True, "discovery_prefix": "homeassistant", "topic_prefix": "sound_detector"}
+    pub.source, pub.version, pub.client = "door", "0", Client()
+    pub.base, pub.availability = "sound_detector/door", "sound_detector/door/availability"
+    pub._discovery("knock")
+    score = json.loads(pub.client.sent["homeassistant/sensor/sound_detector_door_knock_score/config"])
+    # A state class makes Home Assistant compile 5-minute statistics for the sensor and hide it from the logbook.
+    assert "state_class" not in score and "unit_of_measurement" not in score
+    assert score["force_update"] is True
+
+
+def test_binary_state_is_retained_so_home_assistant_has_one_after_its_restart():
+    from sounddetector.mqtt import Publisher
+
+    class Client:
+        def __init__(self):
+            self.sent = []
+
+        def publish(self, topic, payload, retain=False):
+            self.sent.append((topic, payload, retain))
+
+    pub = object.__new__(Publisher)
+    pub.base, pub.client = "sound_detector/door", Client()
+    pub.publish_state("knock", True, {"score": 1.0})
+    pub.publish_state("knock", False)
+    states = [(p, r) for t, p, r in pub.client.sent if t == "sound_detector/door/knock"]
+    assert states == [("ON", True), ("OFF", True)]
+
+
 def test_label_suggestions(tmp_path):
     from sounddetector.app import model_outputs
     from sounddetector.features import clip_features

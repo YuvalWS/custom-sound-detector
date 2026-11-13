@@ -317,7 +317,7 @@ Raw topics, under `topic_prefix` (default `sound_detector`):
 
 | Topic | Payload |
 |---|---|
-| `sound_detector/<source>/<target>` | `ON` / `OFF` |
+| `sound_detector/<source>/<target>` | `ON` / `OFF`, retained |
 | `sound_detector/<source>/<target>/attributes` | JSON, retained |
 | `sound_detector/<source>/<target>/clip` | JSON, one message per saved clip |
 | `sound_detector/<source>/availability` | `online` / `offline`, retained |
