@@ -105,6 +105,8 @@ class Publisher:
         self.client.publish(f"{self.base}/{target}/clip", json.dumps(info))
 
     def publish_state(self, target: str, on: bool, attributes: dict | None = None) -> None:
-        self.client.publish(f"{self.base}/{target}", "ON" if on else "OFF")
+        # Retained, so Home Assistant has a state after its own restart. A stale ON can't outlive the
+        # detector: the availability last-will turns the entity unavailable, and _announce resets it to OFF.
+        self.client.publish(f"{self.base}/{target}", "ON" if on else "OFF", retain=True)
         if attributes is not None:
             self.client.publish(f"{self.base}/{target}/attributes", json.dumps(attributes), retain=True)

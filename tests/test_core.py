@@ -258,6 +258,24 @@ def test_score_sensor_is_an_event_log_not_a_statistic():
     assert score["force_update"] is True
 
 
+def test_binary_state_is_retained_so_home_assistant_has_one_after_its_restart():
+    from sounddetector.mqtt import Publisher
+
+    class Client:
+        def __init__(self):
+            self.sent = []
+
+        def publish(self, topic, payload, retain=False):
+            self.sent.append((topic, payload, retain))
+
+    pub = object.__new__(Publisher)
+    pub.base, pub.client = "sound_detector/door", Client()
+    pub.publish_state("knock", True, {"score": 1.0})
+    pub.publish_state("knock", False)
+    states = [(p, r) for t, p, r in pub.client.sent if t == "sound_detector/door/knock"]
+    assert states == [("ON", True), ("OFF", True)]
+
+
 def test_label_suggestions(tmp_path):
     from sounddetector.app import model_outputs
     from sounddetector.features import clip_features
