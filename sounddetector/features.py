@@ -11,22 +11,35 @@ HOP = 0.1  # seconds between training/scoring windows
 WINDOW_S = 0.96  # length of one YAMNet window
 
 
-def clip_features(store: ClipStore, yamnet: YamNet, clip_id: str) -> dict:
-    """{'emb', 'scores', 'levels', 'starts'} for every window of a clip (cached)."""
+def _cache_path(store: ClipStore, yamnet: YamNet, clip_id: str):
     wav = store.wav_path(clip_id)
-    cache = wav.with_name(f"{clip_id}.emb{yamnet.sha256[:8]}.npz")
+    return wav.with_name(f"{clip_id}.emb{yamnet.sha256[:8]}.npz")
+
+
+def sample_features(yamnet: YamNet, samples: np.ndarray) -> dict:
+    """{'emb', 'scores', 'levels', 'starts'} for every window of some audio."""
+    emb, scores, levels, starts = yamnet.windows(samples, hop=HOP)
+    return {"emb": emb.astype(np.float16), "scores": scores.astype(np.float16), "levels": levels, "starts": starts}
+
+
+def cache_features(store: ClipStore, yamnet: YamNet, clip_id: str, feats: dict) -> None:
+    cache = _cache_path(store, yamnet, clip_id)
+    tmp = cache.with_name(cache.name + ".tmp.npz")
+    np.savez(tmp, **feats)
+    tmp.replace(cache)
+
+
+def clip_features(store: ClipStore, yamnet: YamNet, clip_id: str) -> dict:
+    """sample_features of a saved clip (cached next to it)."""
+    cache = _cache_path(store, yamnet, clip_id)
     if cache.exists():
         try:
             with np.load(cache) as data:
                 return {k: data[k] for k in data.files}
         except (OSError, ValueError):
             cache.unlink(missing_ok=True)
-    emb, scores, levels, starts = yamnet.windows(store.samples(clip_id), hop=HOP)
-    feats = {"emb": emb.astype(np.float16), "scores": scores.astype(np.float16),
-             "levels": levels, "starts": starts}
-    tmp = cache.with_name(cache.name + ".tmp.npz")
-    np.savez(tmp, **feats)
-    tmp.replace(cache)
+    feats = sample_features(yamnet, store.samples(clip_id))
+    cache_features(store, yamnet, clip_id, feats)
     return feats
 
 

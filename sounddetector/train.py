@@ -20,12 +20,12 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 
-from .classifier import TargetModel, model_path
+from .classifier import TargetModel, archive_current, model_path
 from .config import NOT_KNOCK, UNSURE
 from .features import SUSTAIN_OPTIONS, audible, clip_features, quieter_copies, sustained_score, training_windows
 from .store import ClipStore
@@ -291,13 +291,7 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
     model = TargetModel(data)
     path = model_path(data_dir, target)
     report_path = Path(data_dir) / "reports" / f"{target}.json"
-    if path.exists():  # keep the previous model, and the report that came with it
-        history = path.parent / "history"
-        history.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y%m%d-%H%M%S")
-        path.replace(history / f"{target}-{stamp}.json")
-        if report_path.exists():
-            report_path.replace(history / f"{target}-{stamp}.report.json")
+    archive_current(data_dir, target)  # keep the previous model, and the report that came with it
     model.save(path)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=1))
@@ -312,16 +306,41 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
     return report
 
 
-def rescore(store: ClipStore, yamnet, models: dict, progress=None, suggester=None) -> int:
-    """Recompute every clip's model scores and label suggestions (after training)."""
+RESCORE_SCOPES = ("recent", "all", "none")
+
+
+def rescore_ids(store: ClipStore, scope: str = "recent", hours: float = 24) -> list[str]:
+    """The clips to rescore after training: "recent" is the labeled ones and those recorded
+    in the last `hours`; "all" every clip; "none" none."""
+    if scope not in RESCORE_SCOPES:
+        raise ValueError(f"rescore: one of {', '.join(RESCORE_SCOPES)}")
+    if scope == "none":
+        return []
+    metas = store.all()
+    if scope == "all":
+        return [m["id"] for m in metas]
+    since = datetime.now().astimezone() - timedelta(hours=hours)
+    out = []
+    for m in metas:
+        try:
+            recent = datetime.fromisoformat(m["recorded_at"]) >= since
+        except (KeyError, TypeError, ValueError):
+            recent = False
+        if m.get("label") or recent:
+            out.append(m["id"])
+    return out
+
+
+def rescore(store: ClipStore, yamnet, models: dict, progress=None, suggester=None, ids=None) -> int:
+    """Recompute model scores and label suggestions of the given clips (all by default)."""
     say = progress or (lambda msg: log.info(msg))
     from .app import model_outputs
 
     n = 0
-    for meta in store.all():
+    for clip_id in [m["id"] for m in store.all()] if ids is None else ids:
         try:
-            feats = clip_features(store, yamnet, meta["id"])
-            store.update(meta["id"], **model_outputs(models, feats, store.samples(meta["id"]), suggester))
+            feats = clip_features(store, yamnet, clip_id)
+            store.update(clip_id, **model_outputs(models, feats, store.samples(clip_id), suggester))
             n += 1
         except (OSError, ValueError, KeyError):
             continue

@@ -46,7 +46,10 @@ a CPU, and gets better every time you label a missed sound or a false alarm.
 2. **Collect.** A sound event starts when the level rises 15 dB above the background and is
    at least `collection.min_dbfs` loud (-45 dBFS by default), and is saved as a short WAV clip
    with half a second of context. Nothing else is recorded: there is no continuous recording. Each clip gets YAMNet's own top
-   guesses as hints ("Knock 0.59, Speech 0.41").
+   guesses as hints ("Knock 0.59, Speech 0.41"). Settings > Collection chooses what is saved:
+   **all** sounds (to collect training data), **debug** (only what the knock model detects or
+   scores at least its "maybe" threshold: the alerts and near-misses, to check and fine-tune
+   the model), or **off** (nothing; Home Assistant then gets no recordings either).
 3. **Label.** In the web UI: knock, not a knock, or a category (footsteps, voice, keys, door,
    ...). Categories are optional; they show which sounds the model confuses, and any category
    can become a model of its own later.
@@ -215,8 +218,14 @@ bulk-labeled clips worth naming, filter Browse to "Not a knock" and "Suggested: 
 On the first real dataset (614 clips, 9 labels) its first
 suggestion was right 81% of the time, and the right label was in its top three 97%.
 
+After training, the clips are rescored with the new models (their knock scores and suggested
+labels). By default only the labeled clips and the last 24 hours of clips are; the choice under
+the Train button can rescore every clip, or none.
+
 The running service picks up a new model within seconds. The previous one is kept in
-`models/history/`, with the report it came with. Every model file (about 45 kB, plus about
+`models/history/`, with the report it came with. The **Models** list in the Train tab shows every
+model trained, with what it found and its thresholds: "results" opens a model's full report, and
+"Make active" switches the detector back to it (the current one stays in the list). Every model file (about 45 kB, plus about
 50 bytes per training clip) lists its training set: each clip's id and the label it had at
 training time, so any past model stays traceable after labels change or clips are deleted. A model is tied to the YAMNet file it was trained with, so a different
 YAMNet file means retraining.
@@ -355,6 +364,13 @@ The stream, MQTT and web UI passwords are stored in plain text in the config fil
 camera passwords in its `.env`. They are never sent to the browser (the Settings tab only
 shows whether one is set), never written to the log (a login in an ffmpeg error is masked),
 and never part of the repository. The Proxmox helper's saved defaults leave them out.
+
+### Signing in
+
+The web UI asks for its password (user `admin`) once per browser: it then stays signed in for
+90 days, renewed on each visit (`web.session_days`). The sign-in is an HttpOnly, SameSite=Strict
+cookie signed with a random key in `session_secret` in the data directory. Changing the
+password signs every browser out; so does deleting that file.
 
 ### API keys
 

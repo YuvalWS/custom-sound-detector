@@ -31,6 +31,7 @@ MAX_UPLOAD = 200 * 1024 * 1024
 # What a backup holds, under the data directory. settings.yaml is left out: it holds passwords.
 # Installed by proxmox/install.sh: runs `update` as root when the UI writes the request file.
 UPDATE_UNIT = Path("/etc/systemd/system/sound-detector-update.path")
+SESSION_COOKIE = "sd_session"
 BACKUP_PARTS = ("clips", "models", "reports", "categories.json", "events_per_day.json", "yamnet.tflite")
 
 
@@ -370,14 +371,34 @@ class Server:
         log.info("settings changed, restarting")
         threading.Timer(0.7, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
 
-    def start_training(self, target: str) -> bool:
+    def _rescore(self, yam, say, scope: str, extra_target: str | None = None) -> None:
+        from .classifier import load_targets
+        from .suggest import Suggester
+        from .train import rescore, rescore_ids
+
+        ids = rescore_ids(self.store, scope)
+        if not ids:
+            say("clips not rescored")
+            return
+        det = self.cfg["detection"]
+        targets = sorted(set(det["targets"]) | ({extra_target} if extra_target else set()))
+        models = load_targets(self.cfg["data_dir"], targets, yam.sha256, det.get("thresholds"))
+        what = "all clips" if scope == "all" else "the labeled clips and the last 24 hours of clips"
+        say(f"rescoring {what} ({len(ids)}) with the new models")
+        rescore(self.store, yam, models, progress=say, suggester=Suggester.load(self.cfg["data_dir"], yam.sha256),
+                ids=ids)
+
+    def start_training(self, target: str, rescore_scope: str = "recent") -> bool:
+        from .train import RESCORE_SCOPES
+
         if not valid_label(target):
             raise ValueError("invalid target")
+        if rescore_scope not in RESCORE_SCOPES:
+            raise ValueError(f"rescore: one of {', '.join(RESCORE_SCOPES)}")
 
         def job(say):
-            from .classifier import load_targets
-            from .suggest import Suggester, train_suggester
-            from .train import options, rescore, train
+            from .suggest import train_suggester
+            from .train import options, train
 
             with self._yamnet_lock:
                 yam = self.yamnet()
@@ -385,18 +406,79 @@ class Server:
                 say("training the label suggestions")
                 train_suggester(self.store, yam, self.cfg["data_dir"], C=float(self.cfg["training"]["C"]),
                                 progress=say)
-                det = self.cfg["detection"]
-                targets = sorted(set(det["targets"]) | {target})
-                models = load_targets(self.cfg["data_dir"], targets, yam.sha256, det.get("thresholds"))
-                say("rescoring all clips with the new models")
-                rescore(self.store, yam, models, progress=say,
-                        suggester=Suggester.load(self.cfg["data_dir"], yam.sha256))
+                self._rescore(yam, say, rescore_scope, target)
             if self.app:
                 self.app.reload_models(force=True)
             if target not in self.cfg["detection"]["targets"]:
                 say(f"note: '{target}' is not in detection.targets, so it is not published to MQTT")
 
         return self.jobs.start(f"train {target}", job)
+
+    def list_models(self, target: str) -> dict:
+        from .classifier import list_models
+
+        if not valid_label(target):
+            raise ValueError("invalid target")
+        return {"target": target, "models": list_models(self.cfg["data_dir"], target)}
+
+    def activate_model(self, target: str, model_id: str, rescore_scope: str = "recent") -> bool:
+        """Make a previous model active, in the background (clips are rescored with it)."""
+        from .classifier import activate
+        from .train import RESCORE_SCOPES
+
+        if not valid_label(target):
+            raise ValueError("invalid target")
+        if rescore_scope not in RESCORE_SCOPES:
+            raise ValueError(f"rescore: one of {', '.join(RESCORE_SCOPES)}")
+
+        def job(say):
+            with self._yamnet_lock:
+                yam = self.yamnet()
+                archived = activate(self.cfg["data_dir"], target, model_id, yam.sha256)
+                say(f"{model_id} is now the active {target} model"
+                    + (f"; the one it replaced is kept as {archived}" if archived else ""))
+                self._rescore(yam, say, rescore_scope, target)
+            if self.app:
+                self.app.reload_models(force=True)
+
+        return self.jobs.start(f"activate {model_id}", job)
+
+    # ---- sign-in sessions ----------------------------------------------------------------
+    def _session_secret(self) -> bytes:
+        import os
+        import secrets
+
+        p = Path(self.cfg["data_dir"]) / "session_secret"
+        try:
+            return bytes.fromhex(p.read_text().strip())
+        except (OSError, ValueError):
+            p.parent.mkdir(parents=True, exist_ok=True)
+            key = secrets.token_hex(32)
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(key)
+            return bytes.fromhex(key)
+
+    def _sign(self, expires: int, password_header: str) -> str:
+        return hmac.new(self._session_secret(), f"{expires}|{password_header}".encode(), "sha256").hexdigest()
+
+    def session_token(self, password_header: str, now: float | None = None) -> str:
+        """`<expiry>.<signature>`. The signature covers the password, so changing it signs every browser out."""
+        expires = int((now or time.time()) + self.session_seconds())
+        return f"{expires}.{self._sign(expires, password_header)}"
+
+    def session_seconds(self) -> int:
+        return int(float(self.cfg["web"].get("session_days") or 90) * 86400)
+
+    def session_valid(self, token: str, password_header: str, now: float | None = None) -> bool:
+        try:
+            expires_s, sig = token.split(".", 1)
+            expires = int(expires_s)
+        except ValueError:
+            return False
+        if expires < (now or time.time()):
+            return False
+        return hmac.compare_digest(sig, self._sign(expires, password_header))
 
     # ---- HTTP plumbing -------------------------------------------------------------------
     def serve(self) -> ThreadingHTTPServer:
@@ -426,8 +508,17 @@ class Server:
                         self.close_connection = True  # the request body is left unread
                         self._json({"error": f"this API key ({rec['scope']}) may not do that"}, 403)
                         return False
-                elif expected is None or hmac.compare_digest(got.encode(), expected.encode()):
+                elif expected is None:
                     return True
+                elif hmac.compare_digest(got.encode(), expected.encode()):
+                    # The password: keep this browser signed in (renewed on each visit).
+                    self._cookie = (f"{SESSION_COOKIE}={server.session_token(expected)}; "
+                                    f"Max-Age={server.session_seconds()}; Path=/; HttpOnly; SameSite=Strict")
+                    return True
+                else:
+                    token = self._read_cookie(SESSION_COOKIE)
+                    if token and server.session_valid(token, expected):
+                        return True
                 self.close_connection = True
                 self.send_response(401)
                 self.send_header("WWW-Authenticate", 'Basic realm="sound-detector"')
@@ -435,8 +526,22 @@ class Server:
                 self.end_headers()
                 return False
 
+            _cookie = None
+
+            def _read_cookie(self, name: str) -> str | None:
+                from http.cookies import CookieError, SimpleCookie
+
+                try:
+                    c = SimpleCookie(self.headers.get("Cookie", ""))
+                except CookieError:
+                    return None
+                return c[name].value if name in c else None
+
             def _send(self, code: int, body: bytes, ctype: str, extra: dict | None = None):
                 self.send_response(code)
+                if self._cookie:
+                    self.send_header("Set-Cookie", self._cookie)
+                    self._cookie = None
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
@@ -508,11 +613,18 @@ class Server:
                     elif parts == ["api", "export"]:
                         self._send_backup()
                     elif parts == ["api", "report"]:
+                        from .classifier import model_report
+
                         target = q.get("target", KNOCK)
                         if not valid_label(target):
                             raise ValueError("invalid target")
-                        p = Path(server.cfg["data_dir"]) / "reports" / f"{target}.json"
-                        self._json(json.loads(p.read_text()) if p.exists() else None)
+                        if target == "label_suggester":
+                            p = Path(server.cfg["data_dir"]) / "reports" / f"{target}.json"
+                            self._json(json.loads(p.read_text()) if p.exists() else None)
+                        else:
+                            self._json(model_report(server.cfg["data_dir"], target, q.get("model") or "active"))
+                    elif parts == ["api", "models"]:
+                        self._json(server.list_models(q.get("target", KNOCK)))
                     else:
                         self._json({"error": "not found"}, 404)
                 except KeyError:
@@ -570,7 +682,11 @@ class Server:
                         log.info("API key %s revoked", parts[2])
                         self._json({"ok": True})
                     elif parts == ["api", "train"]:
-                        started = server.start_training(data.get("target", KNOCK))
+                        started = server.start_training(data.get("target", KNOCK), data.get("rescore") or "recent")
+                        self._json({"started": started, "job": server.jobs.state()}, 200 if started else 409)
+                    elif parts == ["api", "models", "activate"]:
+                        started = server.activate_model(data.get("target", KNOCK), str(data.get("id", "")),
+                                                        data.get("rescore") or "recent")
                         self._json({"started": started, "job": server.jobs.state()}, 200 if started else 409)
                     else:
                         self._json({"error": "not found"}, 404)

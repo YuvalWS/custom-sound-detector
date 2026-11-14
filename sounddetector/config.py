@@ -49,8 +49,12 @@ DEFAULTS: dict = {
         "reconnect_delay": 5,
     },
     "collection": {
-        # Save a clip of every sound event. Turn off once the model is good enough;
-        # clips that trigger a detection are saved regardless (see detection.save_clips).
+        # Which sounds to save as clips:
+        #   all   - every sound event above the noise threshold (to collect training data)
+        #   debug - only what the knock model detects or scores at least its "maybe" threshold
+        #   off   - none (and so nothing is published per clip on MQTT)
+        # None: from the older `enabled` key (true: all, false: debug).
+        "mode": None,
         "enabled": True,
         # A sound event starts when the 50 ms level rises this many dB above the
         # background (the median level of the last background_window seconds)...
@@ -81,7 +85,7 @@ DEFAULTS: dict = {
         "targets": [KNOCK],
         # Per-target threshold overrides, e.g. {knock: 0.7}. Default: chosen by training.
         "thresholds": {},
-        "save_clips": True,
+        "save_clips": True,  # unused: collection.mode decides (clips with a detection are kept unless "off")
     },
     "mqtt": {
         "enabled": True,
@@ -101,6 +105,9 @@ DEFAULTS: dict = {
         # leave a password set unless the UI is unreachable from anything you don't trust.
         "username": "admin",
         "password": None,
+        # After the password is entered, the browser stays signed in this long (a cookie),
+        # renewed on each visit. Changing the password signs every browser out.
+        "session_days": 90,
     },
     "training": {
         # Inverse regularisation strength of the logistic regression.
@@ -140,7 +147,7 @@ SETTINGS_FILE = "settings.yaml"
 EDITABLE = {
     "source": ["name", "url", "username", "password"],
     "mqtt": ["enabled", "host", "port", "username", "password"],
-    "collection": ["enabled", "min_dbfs", "trigger_db", "max_clips_per_hour", "max_disk_mb"],
+    "collection": ["mode", "enabled", "min_dbfs", "trigger_db", "max_clips_per_hour", "max_disk_mb"],
     "detection": ["targets", "off_delay", "min_hits", "thresholds"],
     "training": ["false_alarms_per_week", "maybe_per_week"],
     "web": ["password"],
@@ -172,6 +179,16 @@ def load(path: str | os.PathLike | None, with_settings: bool = True) -> dict:
         if not LABEL_RE.match(target):
             raise ValueError(f"invalid target label: {target!r}")
     return cfg
+
+
+COLLECTION_MODES = ("all", "debug", "off")
+
+
+def collection_mode(cfg: dict) -> str:
+    coll = cfg["collection"]
+    if coll.get("mode") in COLLECTION_MODES:
+        return coll["mode"]
+    return "all" if coll.get("enabled", True) else "debug"
 
 
 def valid_label(label: str) -> bool:
@@ -255,7 +272,10 @@ def save_settings(cfg: dict, changes: dict) -> dict:
                 elif value:
                     current.setdefault(section, {})[key] = str(value)
                 continue
-            current.setdefault(section, {})[key] = _coerce(DEFAULTS[section][key], value)
+            value = _coerce(DEFAULTS[section][key], value)
+            if (section, key) == ("collection", "mode") and value not in COLLECTION_MODES:
+                raise ValueError(f"collection.mode: one of {', '.join(COLLECTION_MODES)}")
+            current.setdefault(section, {})[key] = value
     if current.get("source", {}).get("name") is not None and not LABEL_RE.match(current["source"]["name"]):
         raise ValueError("source.name: lowercase letters, digits and _ only")
     tmp = path.with_suffix(".tmp")

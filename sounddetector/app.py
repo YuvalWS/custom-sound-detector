@@ -13,9 +13,9 @@ import numpy as np
 from . import SAMPLE_RATE, __version__
 from .audio import LiveSource
 from .classifier import load_targets, model_path
-from .config import stream_url
+from .config import collection_mode, stream_url
 from .events import Event, Segmenter
-from .features import clip_features, event_windows, suggest_span, sustained_score
+from .features import cache_features, clip_features, event_windows, sample_features, suggest_span, sustained_score
 from .store import ClipStore
 from .suggest import Suggester
 from .suggest import model_file as suggest_file
@@ -252,10 +252,21 @@ class App:
             log.exception("could not count the event")
         # A hit belongs to this clip when its window overlaps the sound itself.
         hits = [h for h in self._hits if h[0] > event.onset and h[0] - WINDOW < event.sound_end]
-        save = self.cfg["collection"]["enabled"] or (hits and self.cfg["detection"]["save_clips"])
-        if not save:
+        mode = collection_mode(self.cfg)
+        if mode == "off":
             return
         samples = self.ring.get(event.start, event.end)
+        feats = None
+        if mode == "debug" and not hits:
+            # Only what the models think may be their sound: score it before saving.
+            try:
+                feats = sample_features(self.yamnet, samples)
+                scores = model_outputs(self.models, feats, samples)["scores"]
+            except Exception:
+                log.exception("could not score the event")
+                return
+            if not any(scores.get(t, 0) >= m.maybe_threshold for t, m in self.models.items()):
+                return
         recorded_at = time.time() - (self.ring.pos - event.start) / SAMPLE_RATE
         meta = {
             "source": self.source_name,
@@ -270,7 +281,10 @@ class App:
             saved = self.store.save(samples, meta, enforce_rate=not hits)
             if saved is None:
                 return
-            feats = clip_features(self.store, self.yamnet, saved["id"])
+            if feats is None:
+                feats = clip_features(self.store, self.yamnet, saved["id"])
+            else:
+                cache_features(self.store, self.yamnet, saved["id"], feats)
             saved = self.store.update(saved["id"], **describe_clip(self.yamnet, self.models, feats, samples,
                                                                    self.suggester))
             log.info("clip %s (%.1fs, peak %.0f dBFS) %s", saved["id"], saved["duration"], event.peak_dbfs,
@@ -313,7 +327,8 @@ class App:
             "connected": self.connected,
             "level_dbfs": round(seg.level, 1),
             "background_dbfs": round(seg.background, 1) if seg.background is not None else None,
-            "collecting": bool(self.cfg["collection"]["enabled"]),
+            "collecting": collection_mode(self.cfg) != "off",
+            "collection_mode": collection_mode(self.cfg),
             "events_seen": self.events_seen,
             "uptime_s": int(time.time() - self.started),
             "models": {t: {"threshold": m.threshold, "maybe_threshold": m.maybe_threshold, "sustain": m.sustain,

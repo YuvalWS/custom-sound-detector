@@ -650,3 +650,125 @@ def test_split_a_clip_and_undo_it(tmp_path):
     assert np.array_equal(store.samples(clip["id"]), audio)
     # It survives a restart.
     assert [m["id"] for m in ClipStore(tmp_path).all()] == [clip["id"]]
+
+
+def test_password_signs_the_browser_in_for_months(tmp_path):
+    from sounddetector.web import Server
+
+    cfg = config.load(None)
+    cfg["data_dir"] = str(tmp_path)
+    cfg["web"].update({"host": "127.0.0.1", "port": 0, "password": "pw"})
+    server = Server(cfg, ClipStore(tmp_path))
+    httpd = server.serve()
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    auth = {"Authorization": "Basic " + base64.b64encode(b"admin:pw").decode()}
+    with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=auth)) as resp:
+        cookie = resp.headers["Set-Cookie"]
+    assert "HttpOnly" in cookie and "SameSite=Strict" in cookie and f"Max-Age={90 * 86400}" in cookie
+    token = cookie.split(";")[0]
+    # The cookie alone is enough, until it expires or the password changes.
+    with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers={"Cookie": token})) as resp:
+        assert resp.status == 200
+    for bad in ("sd_session=" + token.split("=", 1)[1][:-1] + "0", "sd_session=1.abc"):
+        with pytest.raises(urllib.error.HTTPError) as err:
+            urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers={"Cookie": bad}))
+        assert err.value.code == 401
+    value = token.split("=", 1)[1]
+    import time as _time
+
+    assert not server.session_valid(value, "Basic other")
+    assert not server.session_valid(value, "Basic " + base64.b64encode(b"admin:pw").decode(),
+                                    now=_time.time() + 91 * 86400)
+    httpd.shutdown()
+
+
+def test_rescore_covers_labeled_and_recent_clips(tmp_path):
+    import time as _time
+
+    from sounddetector.train import rescore_ids
+
+    store = ClipStore(tmp_path)
+    old = store.save(noise(2), {"source": "door", "recorded_at": _time.time() - 3 * 86400}, enforce_rate=False)
+    old_labeled = store.save(noise(2), {"source": "door", "recorded_at": _time.time() - 3 * 86400},
+                             enforce_rate=False)
+    store.set_label(old_labeled["id"], "not_knock")
+    new = store.save(noise(2), {"source": "door"}, enforce_rate=False)
+    assert set(rescore_ids(store, "recent")) == {old_labeled["id"], new["id"]}
+    assert set(rescore_ids(store, "all")) == {old["id"], old_labeled["id"], new["id"]}
+    assert rescore_ids(store, "none") == []
+    with pytest.raises(ValueError):
+        rescore_ids(store, "everything")
+
+
+def test_previous_models_can_be_listed_and_made_active(tmp_path):
+    from sounddetector.classifier import activate, list_models, model_report
+    from sounddetector.train import train
+
+    store = ClipStore(tmp_path)
+    _labeled_dataset(store)
+    first = train(store, FakeYamNet(), "knock", tmp_path)
+    import os
+
+    os.utime(tmp_path / "models" / "knock.json", (1e9, 1e9))  # trained earlier
+    second = train(store, FakeYamNet(), "knock", tmp_path, false_alarms_per_week=3.0)
+    models = list_models(tmp_path, "knock")
+    assert [m["active"] for m in models] == [True, False]
+    old = models[1]
+    assert old["has_report"] and old["cv"] == first["cv"]
+    assert model_report(tmp_path, "knock", old["id"])["trained_at"] == first["trained_at"]
+    with pytest.raises(ValueError):
+        model_report(tmp_path, "knock", "../../etc/passwd")
+    with pytest.raises(ValueError):  # trained on other features
+        activate(tmp_path, "knock", old["id"], "0" * 64)
+    archived = activate(tmp_path, "knock", old["id"], FakeYamNet.sha256)
+    assert model_report(tmp_path, "knock")["trained_at"] == first["trained_at"]
+    assert model_report(tmp_path, "knock", archived)["trained_at"] == second["trained_at"]
+    assert [m["id"] for m in list_models(tmp_path, "knock")] == ["active", archived]
+    with pytest.raises(KeyError):
+        activate(tmp_path, "knock", old["id"], FakeYamNet.sha256)  # no longer in the history
+
+
+def test_debug_collection_saves_only_likely_knocks(tmp_path):
+    from sounddetector.app import App
+    from sounddetector.events import Event
+
+    class Model:
+        threshold, maybe_threshold, sustain = 0.9, 0.4, 0.0
+
+        def __init__(self, p):
+            self.p = p
+
+        def predict(self, emb):
+            return np.full(len(np.atleast_2d(emb)), self.p)
+
+    def run(mode, p, hits=()):
+        cfg = config.load(None)
+        cfg["collection"]["mode"] = mode
+        app = object.__new__(App)
+        app.cfg, app.store, app.yamnet = cfg, ClipStore(tmp_path / f"{mode}-{p}-{len(hits)}"), FakeYamNet()
+        app.models, app.publisher, app.suggester, app.events_seen = {"knock": Model(p)}, None, None, 0
+        app.ring, app._hits, app.source_name = Ring(30), deque(hits), "door"
+        app.ring.append(noise(4))
+        app._event_done(Event(start=0, end=3 * SAMPLE_RATE, onset=SAMPLE_RATE, sound_end=2 * SAMPLE_RATE,
+                              peak_dbfs=-30.0, background_dbfs=-60.0))
+        return len(app.store.all())
+
+    from collections import deque
+
+    assert run("all", 0.0) == 1
+    assert run("off", 1.0) == 0
+    assert run("debug", 0.1) == 0
+    assert run("debug", 0.5) == 1  # at least the "maybe" threshold
+    assert run("debug", 0.0, [(int(1.5 * SAMPLE_RATE), "knock", 0.95)]) == 1  # the live detector fired
+
+
+def test_collection_mode_comes_from_the_older_switch():
+    from sounddetector.config import collection_mode
+
+    cfg = config.load(None)
+    assert collection_mode(cfg) == "all"
+    cfg["collection"]["enabled"] = False
+    assert collection_mode(cfg) == "debug"
+    cfg["collection"]["mode"] = "off"
+    assert collection_mode(cfg) == "off"

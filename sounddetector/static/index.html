@@ -228,11 +228,21 @@ a { color: var(--accent); cursor: pointer; }
       <button class="btn primary" id="t-start">Train</button>
       <span class="small muted" id="t-need"></span>
     </div>
+    <div class="row" style="margin-top:8px">
+      <label for="t-rescore" class="small muted">Then rescore</label>
+      <select id="t-rescore">
+        <option value="recent">labeled clips and the last 24 hours</option>
+        <option value="all">every clip (slower)</option>
+        <option value="none">no clips</option>
+      </select>
+    </div>
     <p class="small muted">Training uses every labeled clip: the chosen label against all the others. It takes seconds to
-      a few minutes, and a running detector switches to the new model straight away. The previous model is kept in
-      <code>models/history/</code>.</p>
+      a few minutes, and a running detector switches to the new model straight away. Rescoring updates the clips' knock
+      scores and suggested labels in Label and Browse; older unlabeled clips keep the scores of the model they were last
+      scored with. The previous model is kept: see "Models" below.</p>
     <pre class="log hidden" id="t-log"></pre>
   </div>
+  <div id="t-models"></div>
   <div id="t-report"></div>
   <div id="t-suggest"></div>
 </section>
@@ -342,7 +352,8 @@ async function refreshStatus() {
   const s = STATUS.service, st = STATUS.stats;
   const conn = s.connected === null ? "" : s.connected ? `<span class="dot on"></span>listening to ${esc(s.source)}` : `<span class="dot off"></span>${esc(s.source)} not connected`;
   const level = s.level_dbfs !== undefined && s.connected ? ` · ${s.level_dbfs} dBFS` : "";
-  const mode = s.models && Object.keys(s.models).length ? " · detecting" : (s.collecting ? " · collecting" : "");
+  const COLL = { all: "saving every sound", debug: "saving likely knocks", off: "saving nothing" };
+  const mode = (s.models && Object.keys(s.models).length ? " · detecting" : "") + (COLL[s.collection_mode] ? ` · ${COLL[s.collection_mode]}` : (s.collecting ? " · collecting" : ""));
   const knocks = st.labels.knock || 0, other = st.total - st.unlabeled - knocks;
   const parts = [conn + level + mode, `<span class="stat"><b>${st.unlabeled}</b> to label</span>`, `${knocks} knock${knocks === 1 ? "" : "s"}`, `${other} other`].filter(Boolean);
   $("status").innerHTML = parts.join(" · ");
@@ -741,20 +752,56 @@ async function loadSuggestReport() {
       ${r.left_out?.length ? `Labels with fewer than 3 clips are left out: ${esc(r.left_out.map(pretty).join(", "))}.` : ""}</p>
     <table><thead><tr><th>Label</th><th class="num">Clips</th><th class="num">First suggestion right</th><th class="num">In top 3</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
+let VIEWING = "active";  // which model's report is shown
+async function loadModels() {
+  const target = $("t-target").value || "knock";
+  const res = await api(`/api/models?target=${encodeURIComponent(target)}`).catch(() => null);
+  const ms = res?.models || [];
+  if (!ms.some((m) => m.id === VIEWING)) VIEWING = "active";
+  if (!ms.length) { $("t-models").innerHTML = ""; return; }
+  const busy = !!STATUS?.job?.running;
+  const rows = ms.map((m) => {
+    const cv = m.cv || {};
+    return `<tr class="${m.id === VIEWING ? "sel" : ""}">
+      <td>${esc(fmtTime(m.trained_at))}${m.active ? ` <b class="small" style="color:var(--good)">active</b>` : ""}</td>
+      <td class="num">${m.clips ?? "?"}</td><td class="num">${m.positive_clips ?? "?"}</td>
+      <td class="num">${cv.recall !== undefined ? `${Math.round(cv.recall * 100)}%` : "?"}</td>
+      <td class="num">${cv.false_positives ?? "?"}</td>
+      <td class="num">${m.threshold !== undefined && m.threshold !== null ? m.threshold.toFixed(2) : "?"}${m.sustain ? ` <span class="muted small">${m.sustain.toFixed(1)} s</span>` : ""}</td>
+      <td class="num">${m.maybe_threshold !== undefined && m.maybe_threshold !== null ? m.maybe_threshold.toFixed(2) : ""}</td>
+      <td>${m.has_report ? (m.id === VIEWING ? `<span class="small muted">shown below</span>` : `<a data-view="${esc(m.id)}">results</a>`) : `<span class="small muted">no report</span>`}</td>
+      <td>${m.active ? "" : `<button class="btn" data-activate="${esc(m.id)}" ${busy ? "disabled" : ""}>Make active</button>`}</td></tr>`;
+  }).join("");
+  $("t-models").innerHTML = `<div class="panel"><b>Models</b>
+    <p class="small muted" style="margin-top:4px">Every model trained, newest first. Each was tested on the labels you had when it was trained,
+      so a later model is usually measured on more, and harder, clips. Making an older model active keeps the current one here, and rescores clips as chosen above.</p>
+    <div style="overflow-x:auto"><table><thead><tr><th>Trained</th><th class="num">Clips</th><th class="num">${esc(pretty(target))}</th>
+      <th class="num">Found</th><th class="num">False alarms</th><th class="num">Threshold</th><th class="num">Maybe</th><th></th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table></div></div>`;
+  $("t-models").querySelectorAll("[data-view]").forEach((a) => a.onclick = () => { VIEWING = a.dataset.view; loadReport(); });
+  $("t-models").querySelectorAll("[data-activate]").forEach((b) => b.onclick = async () => {
+    const m = ms.find((x) => x.id === b.dataset.activate);
+    if (!confirm(`Make the model trained ${fmtTime(m.trained_at)} the active one? The detector switches to it straight away; the current model stays in the list.`)) return;
+    try { await post("/api/models/activate", { target, id: m.id, rescore: $("t-rescore").value }); VIEWING = "active"; pollJob(); } catch (e) { toast(e.message); }
+  });
+}
 async function loadReport() {
   loadSuggestReport();
+  await loadModels();
   const target = $("t-target").value || "knock";
   const counts = STATUS?.stats.labels || {}, pos = counts[target] || 0;
   const neg = Object.entries(counts).filter(([l]) => l !== target && l !== "unsure").reduce((a, [, n]) => a + n, 0);
   $("t-need").textContent = `${pos} ${pretty(target).toLowerCase()} clips, ${neg} others labeled (needs 5 and 10)`;
-  const r = await api(`/api/report?target=${encodeURIComponent(target)}`);
+  const r = await api(`/api/report?target=${encodeURIComponent(target)}&model=${encodeURIComponent(VIEWING)}`);
   if (!r) { $("t-report").innerHTML = `<div class="panel muted">No model for "${esc(pretty(target))}" yet.</div>`; return; }
+  const old = VIEWING !== "active";
   const cv = r.cv, rule = r.threshold_rule || {};
   const rows = r.categories.map((c) => `<tr><td>${esc(pretty(c.label))}</td><td class="num">${c.clips}</td><td class="num">${c.mean_score.toFixed(2)}</td>
     <td class="num">${c.max_score.toFixed(2)}</td><td class="num">${c.label === target ? `${c.above_threshold} found` : c.above_threshold ? `<b style="color:var(--bad)">${c.above_threshold} false</b>` : "0"}</td>
     <td><a data-review="${esc(c.label)}">review</a></td></tr>`).join("");
   $("t-report").innerHTML = `<div class="panel">
-    <div class="row" style="margin-bottom:12px"><b>Model for "${esc(pretty(target))}"</b><span class="muted small">trained ${esc(fmtTime(r.trained_at))}</span></div>
+    <div class="row" style="margin-bottom:12px"><b>${old ? "Previous model" : "Model"} for "${esc(pretty(target))}"</b><span class="muted small">trained ${esc(fmtTime(r.trained_at))}</span>
+      ${old ? `<span class="small" style="color:var(--warn)">not active</span> <a id="view-active">show the active one</a>` : ""}</div>
     <div class="cards">
       <div class="card"><div class="muted small">Clips used</div><div class="v">${r.clips}</div><div class="small muted">${r.positive_clips} ${esc(pretty(target).toLowerCase())}, ${r.negative_clips} other</div></div>
       <div class="card"><div class="muted small">Threshold</div><div class="v">${r.threshold.toFixed(2)}</div><div class="small muted">${r.sustain ? `held for ${r.sustain.toFixed(1)} s, ` : ""}${rule.budget_per_week !== undefined ? `lowest within ${rule.budget_per_week} false alarm${rule.budget_per_week === 1 ? "" : "s"}/week` : esc(rule.note || "")}</div></div>
@@ -780,10 +827,13 @@ async function loadReport() {
     openIds(ids, `${pretty(a.dataset.review)}, by ${pretty(target).toLowerCase()} score`, null, cvMap);
   });
   const rc = $("review-confusing"); if (rc) rc.onclick = () => openIds(r.confusing.map((c) => c.id), "Model got these wrong", null, cvMap);
+  const va = $("view-active"); if (va) va.onclick = () => { VIEWING = "active"; loadReport(); };
 }
-$("t-target").onchange = loadReport;
+$("t-target").onchange = () => { VIEWING = "active"; loadReport(); };
+try { const v = localStorage.getItem("rescore"); if (v) $("t-rescore").value = v; } catch (e) { /* storage blocked */ }
+$("t-rescore").onchange = () => { try { localStorage.setItem("rescore", $("t-rescore").value); } catch (e) { /* storage blocked */ } };
 $("t-start").onclick = async () => {
-  try { await post("/api/train", { target: $("t-target").value }); pollJob(); } catch (e) { toast(e.message); }
+  try { await post("/api/train", { target: $("t-target").value, rescore: $("t-rescore").value }); VIEWING = "active"; pollJob(); } catch (e) { toast(e.message); }
 };
 async function pollJob() {
   await refreshStatus();
@@ -830,7 +880,8 @@ const FIELDS = [
     ["mqtt", "password", "Password", "secret"],
   ]],
   ["Collection", [
-    ["collection", "enabled", "Save a clip of every sound", "bool", "Turn off once the model is good; clips that trigger a detection are always saved."],
+    ["collection", "mode", "Which sounds to save", "select", "All: every sound above the noise threshold, to collect training data. Debug: only what the knock model detects or scores at least its “maybe” threshold, to check and fine-tune it. Off: nothing, so Home Assistant gets no recordings either.",
+      [["all", "All sounds"], ["debug", "Debug: detections and maybes"], ["off", "Off: save nothing"]]],
     ["collection", "min_dbfs", "Quietest sound (dBFS)", "number", "levelHint"],
     ["collection", "trigger_db", "Above background by (dB)", "number", "How much louder than the background a sound must be to count."],
     ["collection", "max_clips_per_hour", "Clips per hour, at most", "number"],
@@ -847,14 +898,16 @@ const FIELDS = [
     ["training", "maybe_per_week", "“Maybe” alerts per week, at most", "number", "A second, lower threshold for a quiet heads-up about soft knocks, published to MQTT as maybe_threshold."],
   ]],
   ["Web UI", [
-    ["web", "password", "New password for this page", "secret", "User admin. The browser asks again after the restart."],
+    ["web", "password", "New password for this page", "secret", "User admin. A browser stays signed in for 90 days after the password is entered (renewed on each visit); changing the password signs every browser out."],
   ]],
 ];
 let SETTINGS = null;
-function fieldHtml([sec, key, label, type, help]) {
-  const id = `f-${sec}-${key}`, v = SETTINGS.settings[sec][key];
+function fieldHtml([sec, key, label, type, help, options]) {
+  const id = `f-${sec}-${key}`;
+  const v = SETTINGS.settings[sec][key];
   let input;
-  if (type === "bool") input = `<label class="row small" style="gap:6px;padding-top:7px;font-weight:400"><input type="checkbox" id="${id}" ${v ? "checked" : ""}> on</label>`;
+  if (type === "select") input = `<select id="${id}">${options.map(([val, name]) => `<option value="${esc(val)}" ${val === v ? "selected" : ""}>${esc(name)}</option>`).join("")}</select>`;
+  else if (type === "bool") input = `<label class="row small" style="gap:6px;padding-top:7px;font-weight:400"><input type="checkbox" id="${id}" ${v ? "checked" : ""}> on</label>`;
   else if (type === "secret") input = `<input type="password" id="${id}" autocomplete="new-password" placeholder="${v.set ? "set: leave empty to keep" : "not set"}">` +
     (v.set && sec !== "web" ? `<label class="small row" style="gap:6px;margin-top:4px;font-weight:400"><input type="checkbox" id="${id}-clear"> remove it</label>` : "");
   else if (type === "list") input = `<input type="text" id="${id}" value="${esc((v || []).join(", "))}">`;
@@ -869,6 +922,8 @@ function levelHint() {
 }
 async function loadSettings() {
   SETTINGS = await api("/api/settings");
+  const coll = SETTINGS.settings.collection;  // no mode yet: the older on/off switch decides
+  if (!coll.mode) coll.mode = coll.enabled === false ? "debug" : "all";
   $("s-pending").classList.toggle("hidden", !SETTINGS.restart_pending);
   $("s-file").textContent = SETTINGS.config_file ? ` (${SETTINGS.config_file})` : "";
   const TESTS = { Stream: "stream", MQTT: "mqtt" };
