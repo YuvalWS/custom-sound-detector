@@ -206,6 +206,7 @@ a { color: var(--accent); cursor: pointer; }
       <button class="btn" id="b-review">Open selected in Label</button>
       <button class="btn danger" id="b-delete">Delete selected</button>
     </div>
+    <div class="small hidden" id="b-allmatch" style="margin-top:8px"></div>
   </div>
   <div class="panel" style="padding:0; overflow-x:auto">
     <table>
@@ -688,11 +689,11 @@ function fillLabelSelects() {
   t.innerHTML = labels.filter((l) => l !== "unsure").map((l) => `<option value="${esc(l)}">${esc(pretty(l))} (${counts[l] || 0} clips)</option>`).join("");
   t.value = tk || "knock";
 }
+const browseFilter = () => `label=${encodeURIComponent($("b-label").value)}&sort=${$("b-sort").value}&detected=${$("b-detected").checked ? 1 : 0}&find=${encodeURIComponent($("b-find").value.trim())}&suggested=${encodeURIComponent($("b-suggested").value)}`;
 async function loadBrowse(reset = true) {
-  if (reset) { browse.offset = 0; browse.rows = []; browse.selected.clear(); }
-  const q = `label=${encodeURIComponent($("b-label").value)}&sort=${$("b-sort").value}&detected=${$("b-detected").checked ? 1 : 0}&find=${encodeURIComponent($("b-find").value.trim())}&suggested=${encodeURIComponent($("b-suggested").value)}&offset=${browse.offset}&limit=100`;
-  const res = await api(`/api/clips?${q}`);
-  browse.rows.push(...res.clips); browse.offset += res.clips.length;
+  if (reset) { browse.offset = 0; browse.rows = []; browse.selected.clear(); $("b-all").checked = false; }
+  const res = await api(`/api/clips?${browseFilter()}&offset=${browse.offset}&limit=100`);
+  browse.rows.push(...res.clips); browse.offset += res.clips.length; browse.total = res.total;
   $("b-count").textContent = `${res.total} clips`;
   $("b-more").classList.toggle("hidden", browse.offset >= res.total);
   renderBrowse();
@@ -708,15 +709,32 @@ function renderBrowse() {
     <td class="small">${c.label_suggestions?.length ? `${esc(pretty(c.label_suggestions[0][0]))} ${Math.round(c.label_suggestions[0][1] * 100)}%` : ""}</td>
     <td class="num">${c.scores?.knock !== undefined ? c.scores.knock.toFixed(2) : ""}</td>
     <td><span class="label-tag ${c.label === "knock" ? "knock" : c.label ? "" : "none"}">${esc(pretty(c.label))}</span></td></tr>`).join("");
+  showSelection();
+}
+// Gmail-style: after "select all" on the loaded rows, offer every clip that matches the filters.
+function showSelection() {
   $("b-selcount").textContent = browse.selected.size;
+  const n = browse.selected.size, total = browse.total || 0, el = $("b-allmatch");
+  const pageAll = browse.rows.length && browse.rows.every((r) => browse.selected.has(r.id));
+  el.classList.toggle("hidden", !(pageAll && total > browse.rows.length) && n <= browse.rows.length);
+  if (n > browse.rows.length) el.innerHTML = `All <b>${n}</b> clips matching the filters are selected. <a id="b-selnone">Clear the selection</a>`;
+  else el.innerHTML = `The ${browse.rows.length} clips shown are selected. <a id="b-selmatch">Select all ${total} clips matching the filters</a>`;
+  const sm = $("b-selmatch"); if (sm) sm.onclick = async () => {
+    const res = await api(`/api/clips?${browseFilter()}&ids_only=1`);
+    res.ids.forEach((id) => browse.selected.add(id)); renderBrowse();
+  };
+  const sn = $("b-selnone"); if (sn) sn.onclick = () => { browse.selected.clear(); $("b-all").checked = false; renderBrowse(); };
 }
 $("b-rows").addEventListener("click", async (e) => {
   const tr = e.target.closest("tr"); if (!tr) return; const id = tr.dataset.id;
-  if (e.target.classList.contains("b-sel")) { e.target.checked ? browse.selected.add(id) : browse.selected.delete(id); tr.classList.toggle("sel", e.target.checked); $("b-selcount").textContent = browse.selected.size; }
+  if (e.target.classList.contains("b-sel")) { e.target.checked ? browse.selected.add(id) : browse.selected.delete(id); tr.classList.toggle("sel", e.target.checked); showSelection(); }
   else if (e.target.closest(".b-play")) { const { buf } = await loadAudio(id); audio.src = URL.createObjectURL(new Blob([buf], { type: "audio/wav" })); audio.play().catch(() => {}); }
   else if (e.target.closest(".b-open")) { openIds(browse.rows.map((r) => r.id), "From Browse", id); }
 });
-$("b-all").onchange = (e) => { browse.rows.forEach((r) => e.target.checked ? browse.selected.add(r.id) : browse.selected.delete(r.id)); renderBrowse(); };
+$("b-all").onchange = (e) => {
+  if (e.target.checked) browse.rows.forEach((r) => browse.selected.add(r.id)); else browse.selected.clear();
+  renderBrowse();
+};
 ["b-label", "b-sort", "b-detected", "b-suggested"].forEach((id) => $(id).onchange = () => loadBrowse());
 $("b-more").onclick = () => loadBrowse(false);
 $("b-clear").onclick = () => {
@@ -733,9 +751,13 @@ $("b-apply").onclick = async () => {
 };
 $("b-review").onclick = () => { if (browse.selected.size) openIds([...browse.selected], "Selected in Browse"); };
 $("b-delete").onclick = async () => {
-  if (!browse.selected.size || !confirm(`Delete ${browse.selected.size} clips for good?`)) return;
-  for (const id of browse.selected) await post(`/api/clips/${encodeURIComponent(id)}/delete`);
-  toast("Deleted"); loadBrowse(); refreshStatus();
+  const n = browse.selected.size;
+  if (!n) return toast("Select clips first");
+  const labeled = browse.rows.filter((r) => browse.selected.has(r.id) && r.label).length;
+  const note = $("b-label").value === "unlabeled" ? "" : " Labeled clips among them are deleted too, and leave the training data.";
+  if (!confirm(`Delete ${n} clips for good? This cannot be undone.${labeled || n > browse.rows.length ? note : ""}`)) return;
+  const res = await post("/api/bulk-delete", { ids: [...browse.selected] });
+  toast(`Deleted ${res.deleted} clips`); loadBrowse(); refreshStatus();
 };
 
 // ---- train tab ----------------------------------------------------------------------

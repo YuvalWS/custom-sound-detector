@@ -265,6 +265,8 @@ class Server:
         else:
             clips.sort(key=lambda c: c["recorded_at"], reverse=True)
         total = len(clips)
+        if q.get("ids_only") == "1":  # every match, for "select all matching"
+            return {"total": total, "ids": [c["id"] for c in clips]}
         offset = int(q.get("offset", 0))
         limit = min(int(q.get("limit", 200)), 2000)
         return {"total": total, "clips": clips[offset:offset + limit]}
@@ -665,6 +667,16 @@ class Server:
                         label = data.get("label") or None
                         done = [server.store.set_label(i, label)["id"] for i in data.get("ids", [])]
                         self._json({"updated": len(done)})
+                    elif parts == ["api", "bulk-delete"]:
+                        deleted = 0
+                        for i in data.get("ids", []):
+                            try:
+                                server.store.delete(str(i))
+                                deleted += 1
+                            except KeyError:
+                                pass
+                        log.info("deleted %d clips in bulk", deleted)
+                        self._json({"deleted": deleted})
                     elif parts == ["api", "categories"]:
                         self._json({"categories": server.store.add_category(str(data.get("name", "")).strip())})
                     elif parts == ["api", "settings"]:

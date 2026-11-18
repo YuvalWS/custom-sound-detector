@@ -772,3 +772,33 @@ def test_collection_mode_comes_from_the_older_switch():
     assert collection_mode(cfg) == "debug"
     cfg["collection"]["mode"] = "off"
     assert collection_mode(cfg) == "off"
+
+
+def test_select_every_matching_clip_and_delete_them(tmp_path):
+    from sounddetector.web import Server
+
+    cfg = config.load(None)
+    cfg["data_dir"] = str(tmp_path)
+    cfg["web"].update({"host": "127.0.0.1", "port": 0, "password": None})
+    store = ClipStore(tmp_path)
+    ids = [store.save(noise(2), {"source": "door"}, enforce_rate=False)["id"] for _ in range(5)]
+    store.set_label(ids[0], "knock")
+    httpd = Server(cfg, store).serve()
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    def call(path, data=None):
+        req = urllib.request.Request(base + path, headers={"Content-Type": "application/json"},
+                                     data=None if data is None else json.dumps(data).encode())
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+
+    matching = call("/api/clips?label=unlabeled&limit=2&ids_only=1")
+    assert matching["total"] == 4 and set(matching["ids"]) == set(ids[1:])  # all of them, not one page
+    assert call("/api/bulk-delete", {"ids": [*matching["ids"], "no-such-clip"]})["deleted"] == 4
+    assert [c["id"] for c in store.all()] == [ids[0]]
+    assert not store.wav_path(ids[0]).with_name(f"{ids[1]}.wav").exists()
+    httpd.shutdown()
+    from sounddetector.apikeys import allowed
+
+    assert not allowed("labeling", "POST", ["api", "bulk-delete"])

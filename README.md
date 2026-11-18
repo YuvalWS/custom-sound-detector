@@ -210,7 +210,8 @@ A good first dataset:
 once (a multinomial logistic regression on the same features, labels with at least 3 clips).
 It suggests a label for every clip: in the Label tab press A to accept the first suggestion
 or click another; in Browse, filter by suggested label (then select all and label them in
-bulk) or sort by how sure it is. The Train tab shows how often it was right on clips it had
+bulk) or sort by how sure it is. After "select all" in Browse, a link selects every clip that matches the filters, not just those
+loaded, to label or delete them at once (for example: Unlabeled, select all, then every match, Delete selected). The Train tab shows how often it was right on clips it had
 not seen. Detection never uses it. "Not a knock" is a catch-all (quiet noise, sounds nobody named,
 and named sounds labeled in bulk), so a second model is trained on the named kinds of sound
 alone; when it is sure (50% or more), its kind is suggested before "Not a knock". To find
