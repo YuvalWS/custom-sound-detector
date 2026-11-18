@@ -146,6 +146,36 @@ class ClipStore:
             self.add_category(label)
         return self.update(clip_id, **fields)
 
+    def group_ids(self, clip_id: str) -> list[str]:
+        """The clips one sound was cut into (the clip limit), in time order: itself when it wasn't cut."""
+        group = self.get(clip_id).get("group") or [clip_id]
+        with self._lock:
+            return [g for g in group if g in self._index] or [clip_id]
+
+    def label_group(self, clip_id: str, label: str | None, note: str | None = None) -> dict:
+        """Label the clip, and the still-unlabeled clips of its group the same."""
+        result = self.set_label(clip_id, label, note)
+        for other in self.group_ids(clip_id):
+            if other != clip_id and not self.get(other).get("label"):
+                self.set_label(other, label)
+        return result
+
+    def group_samples(self, clip_id: str) -> np.ndarray:
+        """The group's clips joined into one recording, their overlap (the pre-roll) played once."""
+        meta = self.get(clip_id)
+        group, offsets = meta.get("group") or [clip_id], meta.get("group_offsets")
+        ids = self.group_ids(clip_id)
+        if offsets and len(offsets) == len(group):  # where each starts in the stream: exact
+            starts = dict(zip(group, offsets, strict=True))
+        else:  # the clock times, a few ms apart
+            starts = {c: datetime.fromisoformat(self.get(c)["recorded_at"]).timestamp() for c in ids}
+        ids.sort(key=starts.__getitem__)
+        out = np.zeros(0, dtype=np.int16)
+        for cid in ids:
+            skip = max(0, len(out) - int(round((starts[cid] - starts[ids[0]]) * SAMPLE_RATE)))
+            out = np.concatenate([out, self.samples(cid)[skip:]])
+        return out
+
     def set_span(self, clip_id: str, span) -> dict:
         """Mark the part of the clip the label is about, [start, end] in seconds, or None for all of it."""
         if span is None:

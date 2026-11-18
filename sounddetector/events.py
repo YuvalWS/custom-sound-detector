@@ -36,6 +36,7 @@ class Event:
     sound_end: int  # absolute sample index of the last loud frame
     peak_dbfs: float  # loudest 50 ms level
     background_dbfs: float
+    cut: bool = False  # ended by the clip length limit while the sound went on
 
 
 class Segmenter:
@@ -111,11 +112,11 @@ class Segmenter:
                 too_long = frame_end - (self._ev_onset - self.pre_roll) >= self.max_clip
                 quiet = frame_end - self.last_active >= self.post_roll
                 if quiet or too_long:
-                    done.append(self._finish(frame_end))
+                    done.append(self._finish(frame_end, cut=not quiet))
             self.pos = frame_end  # a partial frame is counted once it completes
         return done
 
-    def _finish(self, now: int) -> Event:
+    def _finish(self, now: int, cut: bool = False) -> Event:
         self.active = False
         start = max(0, self._ev_onset - self.pre_roll)
         end = min(now, start + self.max_clip)
@@ -123,7 +124,7 @@ class Segmenter:
             start = max(0, end - self.min_clip)
         return Event(start=start, end=end, onset=self._ev_onset, sound_end=min(self.last_active, end),
                      peak_dbfs=round(self._ev_peak, 1),
-                     background_dbfs=round(self._ev_bg, 1))
+                     background_dbfs=round(self._ev_bg, 1), cut=cut)
 
 
 def segment(samples: np.ndarray, collection_cfg: dict) -> list[Event]:

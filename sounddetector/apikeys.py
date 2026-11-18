@@ -107,5 +107,5 @@ def allowed(scope: str, method: str, parts: list[str]) -> bool:
     if method in ("GET", "HEAD"):
         return (parts in (["api", "status"], ["api", "clips"], ["api", "report"])
                 or (len(parts) == 3 and parts[:2] == ["api", "clips"])
-                or (len(parts) == 4 and parts[:2] == ["api", "clips"] and parts[3] == "audio"))
+                or (len(parts) == 4 and parts[:2] == ["api", "clips"] and parts[3] in ("audio", "group-audio")))
     return len(parts) == 4 and parts[:2] == ["api", "clips"] and parts[3] in ("label", "span")

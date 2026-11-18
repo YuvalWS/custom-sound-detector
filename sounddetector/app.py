@@ -81,6 +81,12 @@ def describe_clip(yamnet: YamNet, models: dict, feats: dict, samples: np.ndarray
 
 
 class App:
+    # The clips of the sound being alerted on, while it may go on into another clip: one sound
+    # cut by the clip limit is one alert, sent when its last clip ends.
+    # {"clips": [saved clip, ...], "detected": {clip id: {target, ...}}, "starts": [absolute sample index, ...],
+    #  "end": absolute sample index}
+    _alert: dict | None = None
+
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.source_name = cfg["source"]["name"]
@@ -188,6 +194,8 @@ class App:
         self.ring.append(chunk)
         for event in self.segmenter.feed(chunk):
             self._event_done(event)
+        if self._alert and not self.segmenter.active and self.ring.pos - self._alert["end"] > SAMPLE_RATE:
+            self._flush_alert()  # the sound stopped right at the clip limit: nothing more to join
         self._detect(len(chunk))
         now = self.ring.pos / SAMPLE_RATE
         off_delay = float(self.cfg["detection"]["off_delay"])
@@ -245,6 +253,41 @@ class App:
             self.publisher.publish_state(target, on, self._attrs(target, **extra))
 
     def _event_done(self, event: Event) -> None:
+        if self._alert and event.start > self._alert["end"]:
+            self._flush_alert()  # not the same sound going on
+        saved, detected = self._save_event(event)
+        if saved is not None:
+            if self._alert is None:
+                self._alert = {"clips": [], "detected": {}, "starts": [], "end": 0}
+            self._alert["clips"].append(saved)
+            self._alert["starts"].append(event.start)
+            self._alert["detected"][saved["id"]] = detected
+            self._alert["end"] = event.end
+        if self._alert and not (saved is not None and event.cut):
+            self._flush_alert()
+
+    def _flush_alert(self) -> None:
+        alert, self._alert = self._alert, None
+        clips = alert["clips"] if alert else []
+        if not clips:
+            return
+        if len(clips) > 1:
+            ids = [c["id"] for c in clips]
+            # Where each clip starts in the stream, from the first: joins them exactly.
+            offsets = [round((s - alert["starts"][0]) / SAMPLE_RATE, 4) for s in alert["starts"]]
+            for i, c in enumerate(clips):
+                try:
+                    clips[i] = self.store.update(c["id"], group=ids, group_offsets=offsets)
+                except KeyError:
+                    pass  # deleted meanwhile
+        if self.publisher:
+            try:
+                self._publish_clip(clips, alert["detected"], (alert["end"] - alert["starts"][0]) / SAMPLE_RATE)
+            except Exception:
+                log.exception("could not publish the clip")
+
+    def _save_event(self, event: Event) -> tuple[dict | None, set]:
+        """Save the event's clip if the collection mode wants it: (the saved clip, targets that fired)."""
         self.events_seen += 1
         try:
             self.store.count_event()
@@ -254,7 +297,7 @@ class App:
         hits = [h for h in self._hits if h[0] > event.onset and h[0] - WINDOW < event.sound_end]
         mode = collection_mode(self.cfg)
         if mode == "off":
-            return
+            return None, set()
         samples = self.ring.get(event.start, event.end)
         feats = None
         if mode == "debug" and not hits:
@@ -264,9 +307,9 @@ class App:
                 scores = model_outputs(self.models, feats, samples)["scores"]
             except Exception:
                 log.exception("could not score the event")
-                return
+                return None, set()
             if not any(scores.get(t, 0) >= m.maybe_threshold for t, m in self.models.items()):
-                return
+                return None, set()
         recorded_at = time.time() - (self.ring.pos - event.start) / SAMPLE_RATE
         meta = {
             "source": self.source_name,
@@ -280,7 +323,7 @@ class App:
         try:
             saved = self.store.save(samples, meta, enforce_rate=not hits)
             if saved is None:
-                return
+                return None, set()
             if feats is None:
                 feats = clip_features(self.store, self.yamnet, saved["id"])
             else:
@@ -289,34 +332,47 @@ class App:
                                                                    self.suggester))
             log.info("clip %s (%.1fs, peak %.0f dBFS) %s", saved["id"], saved["duration"], event.peak_dbfs,
                      ", ".join(f"{n} {s}" for n, s in saved["hints"]))
+            fired = {t for _, t, _ in hits}
             if self.publisher:
-                for target in {t for _, t, _ in hits}:
+                for target in fired:
                     if target in self.models:
                         self.publisher.publish_state(target, self.states[target].on,
                                                      self._attrs(target, clip_id=saved["id"]))
-                self._publish_clip(saved, {t for _, t, _ in hits})
+            return saved, fired
         except Exception:  # a failed save must never stop the audio loop
             log.exception("could not save clip")
+            return None, set()
 
-    def _publish_clip(self, clip: dict, detected: set) -> None:
-        """Every saved clip, with each model's score: Home Assistant picks its own thresholds."""
+    def _publish_clip(self, clips: list[dict], detected: dict, seconds: float | None = None) -> None:
+        """One message per sound, with each model's score: Home Assistant picks its own thresholds.
+
+        A sound cut into back-to-back clips by the clip limit is one message: `clip_ids` lists them,
+        `clip_id` is the main one (the live detector fired on it, else the highest score), `score` the
+        highest, and `group_audio` plays them joined.
+        """
         for target, m in self.models.items():
-            score = (clip.get("scores") or {}).get(target)
-            if score is None:
+            scored = [(c, (c.get("scores") or {}).get(target)) for c in clips]
+            scored = [(c, s) for c, s in scored if s is not None]
+            if not scored:
                 continue
+            fired = [c for c, _ in scored if target in detected.get(c["id"], ())]
+            clip = fired[0] if fired else max(scored, key=lambda cs: cs[1])[0]
             self.publisher.publish_clip(target, {
                 "clip_id": clip["id"],
-                "score": score,
+                "clip_ids": [c["id"] for c in clips],
+                "score": max(s for _, s in scored),
                 "threshold": m.threshold,
                 "maybe_threshold": m.maybe_threshold,
-                # Whether the live detector turned the sensor on for this clip.
-                "detected": target in detected,
-                "recorded_at": clip.get("recorded_at"),
-                "duration": clip.get("duration"),
-                "peak_dbfs": clip.get("peak_dbfs"),
+                # Whether the live detector turned the sensor on for this sound.
+                "detected": bool(fired),
+                "recorded_at": clips[0].get("recorded_at"),
+                "duration": round(seconds, 2) if len(clips) > 1 and seconds else clips[0].get("duration"),
+                "peak_dbfs": max((c.get("peak_dbfs") for c in clips if c.get("peak_dbfs") is not None),
+                                 default=None),
                 "span": (clip.get("suggested_spans") or {}).get(target),
                 # Relative to the web UI's address; add ?format=ogg for a Telegram voice note.
                 "audio": f"api/clips/{clip['id']}/audio",
+                "group_audio": f"api/clips/{clip['id']}/group-audio",
             })
 
     def status(self) -> dict:

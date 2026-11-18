@@ -243,14 +243,28 @@ With MQTT discovery on (the default), every trained target appears as two entiti
   detector saves, a second or two after the sound ends. Its attributes are the clip message
   below, so an automation can alert at two levels and fetch the recording.
 
-Each saved clip is published on `sound_detector/<source>/<target>/clip`:
+Each saved sound is published on `sound_detector/<source>/<target>/clip`:
 
 ```json
-{"clip_id": "front_door_audio-20261112-145338-277", "score": 0.981,
+{"clip_id": "front_door_audio-20261112-145338-277",
+ "clip_ids": ["front_door_audio-20261112-145338-277"], "score": 0.981,
  "threshold": 0.95, "maybe_threshold": 0.42, "detected": true,
  "recorded_at": "2026-11-12T14:53:38.277+02:00", "duration": 2.43, "peak_dbfs": -30.1,
- "span": [0.22, 1.14], "audio": "api/clips/front_door_audio-20261112-145338-277/audio"}
+ "span": [0.22, 1.14], "audio": "api/clips/front_door_audio-20261112-145338-277/audio",
+ "group_audio": "api/clips/front_door_audio-20261112-145338-277/group-audio"}
 ```
+
+A sound longer than the clip limit (`max_clip`, 6 s) is saved as back-to-back clips, and is
+still one message, sent when its last clip ends:
+
+- `clip_ids` lists its clips in time order (one, for most sounds).
+- `clip_id` is the main one: the clip the live detector fired on, else the highest-scoring.
+- `score` is the highest of the clips; `detected` is true if the live detector fired on any.
+- `group_audio` plays all of them joined, the overlap once; `audio` is the main clip alone.
+- To label the whole sound, post `{"label": "not_knock", "group": true}` to the main clip's
+  `/label`: it labels that clip and the group's clips that have no label yet.
+
+The knock sensor (`ON`/`OFF`) never waits for this: it turns on at the first hit.
 
 - `threshold` is the alarm threshold training chose, within `training.false_alarms_per_week`.
 - `maybe_threshold` is a lower one, within `training.maybe_per_week` (7 by default): soft
@@ -294,7 +308,7 @@ automation:
           sure: "{{ clip.score >= clip.threshold }}"
       - action: telegram_bot.send_voice
         data:
-          url: "http://sound-detector.lan:8080/{{ clip.audio }}?format=ogg"
+          url: "http://sound-detector.lan:8080/{{ clip.group_audio }}?format=ogg"
           authentication: bearer_token
           password: !secret sound_detector_api_key
           caption: "{{ 'Knock at the door' if sure else 'Maybe a knock' }} ({{ clip.score }})"
@@ -329,7 +343,7 @@ Raw topics, under `topic_prefix` (default `sound_detector`):
 |---|---|
 | `sound_detector/<source>/<target>` | `ON` / `OFF`, retained |
 | `sound_detector/<source>/<target>/attributes` | JSON, retained |
-| `sound_detector/<source>/<target>/clip` | JSON, one message per saved clip |
+| `sound_detector/<source>/<target>/clip` | JSON, one message per saved sound |
 | `sound_detector/<source>/availability` | `online` / `offline`, retained |
 
 ## Command line

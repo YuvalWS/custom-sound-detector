@@ -230,9 +230,10 @@ def test_each_saved_clip_is_published_with_its_score():
     app.models, app.publisher = {"knock": Model()}, Pub()
     clip = {"id": "door-20261112-120000-000", "scores": {"knock": 0.55}, "recorded_at": "2026-11-12T12:00:00+02:00",
             "duration": 3.0, "peak_dbfs": -35.0, "suggested_spans": {"knock": [0.7, 1.5]}}
-    app._publish_clip(clip, set())
+    app._publish_clip([clip], {})
     (target, info), = app.publisher.sent
     assert target == "knock" and info["score"] == 0.55 and not info["detected"]
+    assert info["clip_ids"] == ["door-20261112-120000-000"] and info["duration"] == 3.0
     assert (info["threshold"], info["maybe_threshold"], info["span"]) == (0.9, 0.4, [0.7, 1.5])
     assert info["audio"] == "api/clips/door-20261112-120000-000/audio"
 
@@ -802,3 +803,71 @@ def test_select_every_matching_clip_and_delete_them(tmp_path):
     from sounddetector.apikeys import allowed
 
     assert not allowed("labeling", "POST", ["api", "bulk-delete"])
+
+
+def test_one_sound_cut_by_the_clip_limit_is_one_alert(tmp_path):
+    from collections import deque
+
+    from sounddetector.apikeys import allowed
+    from sounddetector.app import App
+    from sounddetector.events import Event
+
+    class Model:
+        threshold, maybe_threshold, sustain = 0.9, 0.4, 0.0
+
+        def predict(self, emb):
+            return np.full(len(np.atleast_2d(emb)), 0.2)
+
+    class Pub:
+        def __init__(self):
+            self.sent = []
+
+        def publish_clip(self, target, info):
+            self.sent.append((target, info))
+
+        def publish_state(self, *a):
+            pass
+
+    cfg = config.load(None)
+    cfg["collection"]["mode"] = "all"
+    app = object.__new__(App)
+    app.cfg, app.store, app.yamnet = cfg, ClipStore(tmp_path), FakeYamNet()
+    app.models, app.publisher, app.suggester, app.events_seen = {"knock": Model()}, Pub(), None, 0
+    app.states = {"knock": type("S", (), {"on": True})()}
+    app._attrs = lambda target, **extra: extra
+    app.ring, app.source_name = Ring(30), "door"
+    app.ring.append(noise(16))
+    sr = SAMPLE_RATE
+    app._hits = deque([(7 * sr, "knock", 0.99)])  # the live detector fired in the second clip
+    app._event_done(Event(start=0, end=6 * sr, onset=sr * 3 // 4, sound_end=6 * sr, peak_dbfs=-30.0,
+                          background_dbfs=-60.0, cut=True))
+    assert app.publisher.sent == []  # waits: the sound may go on
+    app._event_done(Event(start=int(5.25 * sr), end=10 * sr, onset=6 * sr, sound_end=9 * sr, peak_dbfs=-25.0,
+                          background_dbfs=-60.0))
+    (target, info), = app.publisher.sent
+    first, second = info["clip_ids"]
+    assert info["clip_id"] == second and info["detected"] and info["peak_dbfs"] == -25.0
+    assert info["group_audio"] == f"api/clips/{second}/group-audio"
+    assert abs(info["duration"] - 10.0) < 0.05
+    assert app.store.group_ids(first) == [first, second] == app.store.group_ids(second)
+    assert abs(len(app.store.group_samples(first)) - 10 * sr) < sr // 50  # the 0.75 s overlap played once
+
+    # "Not a knock" from the alert labels the whole sound; a label already set is kept.
+    app.store.set_label(first, "music")
+    app.store.label_group(second, "not_knock")
+    assert [app.store.get(c)["label"] for c in (first, second)] == ["music", "not_knock"]
+    assert allowed("labeling", "GET", ["api", "clips", second, "group-audio"])
+
+    # A clip that ends in quiet is its own alert at once; a cut one with nothing after it, after 1 s.
+    app.publisher.sent.clear()
+    app._hits = deque()
+    app._event_done(Event(start=11 * sr, end=14 * sr, onset=12 * sr, sound_end=13 * sr, peak_dbfs=-30.0,
+                          background_dbfs=-60.0))
+    assert len(app.publisher.sent) == 1 and len(app.publisher.sent[0][1]["clip_ids"]) == 1
+    app._event_done(Event(start=14 * sr, end=16 * sr, onset=14 * sr, sound_end=16 * sr, peak_dbfs=-30.0,
+                          background_dbfs=-60.0, cut=True))
+    assert len(app.publisher.sent) == 1
+    app.segmenter = type("Seg", (), {"active": False, "feed": lambda self, chunk: []})()
+    app._detect, app.states = (lambda n: None), {}
+    app.process(noise(1.5))
+    assert len(app.publisher.sent) == 2

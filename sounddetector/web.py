@@ -572,6 +572,19 @@ class Server:
             def _json(self, obj, code: int = 200):
                 self._send(code, json.dumps(obj).encode(), "application/json")
 
+            def _send_group_audio(self, store, clip_id: str, ogg: bool):
+                from .audio import to_ogg, write_wav
+
+                samples = store.group_samples(clip_id)
+                with tempfile.TemporaryDirectory() as tmp:
+                    wav = Path(tmp) / "group.wav"
+                    write_wav(wav, samples)
+                    if ogg:
+                        self._send(200, to_ogg(wav), "audio/ogg",
+                                   {"Content-Disposition": f'inline; filename="{clip_id}-group.ogg"'})
+                    else:
+                        self._send(200, wav.read_bytes(), "audio/wav")
+
             def _body(self) -> bytes:
                 n = int(self.headers.get("Content-Length") or 0)
                 if n > MAX_UPLOAD:
@@ -602,6 +615,9 @@ class Server:
                                        {"Content-Disposition": f'inline; filename="{parts[2]}.ogg"'})
                         else:
                             self._send(200, wav.read_bytes(), "audio/wav")
+                    elif len(parts) == 4 and parts[:2] == ["api", "clips"] and parts[3] == "group-audio":
+                        # The clips one sound was cut into, joined: what a knock alert plays.
+                        self._send_group_audio(server.store, parts[2], q.get("format") == "ogg")
                     elif parts == ["api", "settings"]:
                         self._json(server.settings())
                     elif parts == ["api", "logs"]:
@@ -653,7 +669,9 @@ class Server:
                         return
                     data = json.loads(self._body() or b"{}")
                     if len(parts) == 4 and parts[:2] == ["api", "clips"] and parts[3] == "label":
-                        self._json(server.store.set_label(parts[2], data.get("label") or None, data.get("note")))
+                        # "group": also label the still-unlabeled clips the same sound was cut into.
+                        label_fn = server.store.label_group if data.get("group") else server.store.set_label
+                        self._json(label_fn(parts[2], data.get("label") or None, data.get("note")))
                     elif len(parts) == 4 and parts[:2] == ["api", "clips"] and parts[3] == "span":
                         self._json(server.store.set_span(parts[2], data.get("span")))
                     elif len(parts) == 4 and parts[:2] == ["api", "clips"] and parts[3] == "split":
