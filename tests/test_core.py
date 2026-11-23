@@ -173,6 +173,15 @@ def test_training_report_and_model(tmp_path):
 
     assert [o["sustain"] for o in report["sustain_options"]] == list(SUSTAIN_OPTIONS)
     assert report["sustain"] in SUSTAIN_OPTIONS
+    # Each sustain lists what other thresholds would find, for an override chosen by hand.
+    grid = report["sustain_options"][0]["grid"]
+    assert [g["threshold"] for g in grid] == sorted(g["threshold"] for g in grid)
+    pairs = zip(grid, grid[1:], strict=False)
+    assert all(a["found"] >= b["found"] and a["false_alarms"] >= b["false_alarms"] for a, b in pairs)
+    # When no sustain fits the budget, the one with the fewest false alarms is kept.
+    chosen = next(o for o in report["sustain_options"] if o["sustain"] == report["sustain"])
+    if not rule["met"]:
+        assert chosen["false_alarms"] == min(o["false_alarms"] for o in report["sustain_options"])
     models = load_targets(tmp_path, ["knock"], FakeYamNet.sha256)
     assert set(models) == {"knock"}
     # A model trained on other features is refused.

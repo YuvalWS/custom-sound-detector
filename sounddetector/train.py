@@ -67,6 +67,7 @@ def _events_per_day(store: ClipStore) -> float | None:
     return float(np.median(full)) if full else None
 
 
+GRID = (0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.93, 0.96, 0.98, 0.99)  # thresholds the report tabulates
 FLOOR = 0.5  # where the model itself starts to say "yes"; the budget can only raise it
 MAYBE_FLOOR = 0.2  # the "maybe" threshold may go lower: it is a quiet heads-up, not an alarm
 
@@ -200,10 +201,15 @@ def train(store: ClipStore, yamnet, target: str, data_dir, C: float = 1.0, min_p
             c = budget_threshold(scores[~truth], epd, float(false_alarms_per_week))
             found = int(np.sum(scores[truth] >= c["threshold"]))
             false = int(np.sum(scores[~truth] >= c["threshold"]))
+            # What other thresholds would do at this sustain: for choosing an override by hand.
+            grid = [{"threshold": t, "found": int(np.sum(scores[truth] >= t)),
+                     "false_alarms": int(np.sum(scores[~truth] >= t))} for t in GRID]
             sustain_options.append({"sustain": sustain, "threshold": c["threshold"], "found": found,
-                                    "false_alarms": false})
-            # Within the budget first, then the most found, then the fewest false alarms.
-            key = (c["rule"]["met"], found, -false)
+                                    "false_alarms": false, "grid": grid})
+            # Within the budget, the most found. When no sustain fits it, the fewest false alarms:
+            # a budget that can't be met must not end up as the noisiest setting.
+            met = c["rule"]["met"]
+            key = (True, found, -false) if met else (False, -false, found)
             if best is None or key > best[0]:
                 best = (key, sustain, scores, c)
         _, sustain, oof, choice = best
