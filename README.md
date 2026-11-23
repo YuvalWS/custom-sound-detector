@@ -47,9 +47,10 @@ a CPU, and gets better every time you label a missed sound or a false alarm.
    at least `collection.min_dbfs` loud (-45 dBFS by default), and is saved as a short WAV clip
    with half a second of context. Nothing else is recorded: there is no continuous recording. Each clip gets YAMNet's own top
    guesses as hints ("Knock 0.59, Speech 0.41"). Settings > Collection chooses what is saved:
-   **all** sounds (to collect training data), **debug** (only what the knock model detects or
-   scores at least its "maybe" threshold: the alerts and near-misses, to check and fine-tune
-   the model), or **off** (nothing; Home Assistant then gets no recordings either).
+   **all** sounds (to collect training data), **debug** (only what the knock model detects,
+   scores at least its "maybe" threshold, or scores at least "Debug: save from knock score"
+   (0.5) at any moment, held or not: the alerts and near-misses, to check and fine-tune the
+   model), or **off** (nothing; Home Assistant then gets no recordings either).
 3. **Label.** In the web UI: knock, not a knock, or a category (footsteps, voice, keys, door,
    ...). Categories are optional; they show which sounds the model confuses, and any category
    can become a model of its own later.

@@ -305,10 +305,13 @@ class App:
             try:
                 feats = sample_features(self.yamnet, samples)
                 scores = model_outputs(self.models, feats, samples)["scores"]
+                emb = feats["emb"].astype(np.float32)
+                peaks = {t: float(m.predict(emb).max()) if len(emb) else 0.0 for t, m in self.models.items()}
             except Exception:
                 log.exception("could not score the event")
                 return None, set()
-            if not any(scores.get(t, 0) >= m.maybe_threshold for t, m in self.models.items()):
+            floor = float(self.cfg["collection"].get("debug_min_score", 1.0))
+            if not any(scores.get(t, 0) >= m.maybe_threshold or peaks[t] >= floor for t, m in self.models.items()):
                 return None, set()
         recorded_at = time.time() - (self.ring.pos - event.start) / SAMPLE_RATE
         meta = {

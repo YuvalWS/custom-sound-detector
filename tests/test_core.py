@@ -743,9 +743,10 @@ def test_debug_collection_saves_only_likely_knocks(tmp_path):
         def predict(self, emb):
             return np.full(len(np.atleast_2d(emb)), self.p)
 
-    def run(mode, p, hits=()):
+    def run(mode, p, hits=(), floor=1.0):
         cfg = config.load(None)
         cfg["collection"]["mode"] = mode
+        cfg["collection"]["debug_min_score"] = floor
         app = object.__new__(App)
         app.cfg, app.store, app.yamnet = cfg, ClipStore(tmp_path / f"{mode}-{p}-{len(hits)}"), FakeYamNet()
         app.models, app.publisher, app.suggester, app.events_seen = {"knock": Model(p)}, None, None, 0
@@ -762,6 +763,8 @@ def test_debug_collection_saves_only_likely_knocks(tmp_path):
     assert run("debug", 0.1) == 0
     assert run("debug", 0.5) == 1  # at least the "maybe" threshold
     assert run("debug", 0.0, [(int(1.5 * SAMPLE_RATE), "knock", 0.95)]) == 1  # the live detector fired
+    assert run("debug", 0.3, floor=0.25) == 1  # a near-miss, saved for labeling
+    assert run("debug", 0.2, floor=0.25) == 0
 
 
 def test_collection_mode_comes_from_the_older_switch():

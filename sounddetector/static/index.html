@@ -902,8 +902,9 @@ const FIELDS = [
     ["mqtt", "password", "Password", "secret"],
   ]],
   ["Collection", [
-    ["collection", "mode", "Which sounds to save", "select", "All: every sound above the noise threshold, to collect training data. Debug: only what the knock model detects or scores at least its “maybe” threshold, to check and fine-tune it. Off: nothing, so Home Assistant gets no recordings either.",
+    ["collection", "mode", "Which sounds to save", "select", "All: every sound above the noise threshold, to collect training data. Debug: only what the knock model detects or may have heard (see the next setting), to check and fine-tune it. Off: nothing, so Home Assistant gets no recordings either.",
       [["all", "All sounds"], ["debug", "Debug: detections and maybes"], ["off", "Off: save nothing"]]],
+    ["collection", "debug_min_score", "Debug: save from knock score", "number", "In debug mode, also save a sound when the knock model scores any moment of it at least this (0–1), even if the score didn't stay up long enough to alert. Lower saves more near-misses to label; 1 saves only detections and maybes."],
     ["collection", "min_dbfs", "Quietest sound (dBFS)", "number", "levelHint"],
     ["collection", "trigger_db", "Above background by (dB)", "number", "How much louder than the background a sound must be to count."],
     ["collection", "max_clips_per_hour", "Clips per hour, at most", "number"],

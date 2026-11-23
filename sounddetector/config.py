@@ -51,11 +51,16 @@ DEFAULTS: dict = {
     "collection": {
         # Which sounds to save as clips:
         #   all   - every sound event above the noise threshold (to collect training data)
-        #   debug - only what the knock model detects or scores at least its "maybe" threshold
+        #   debug - only what the knock model detects, or what it hears as its sound in any 0.96 s
+        #           window at debug_min_score or more (or a clip score at its "maybe" threshold)
         #   off   - none (and so nothing is published per clip on MQTT)
         # None: from the older `enabled` key (true: all, false: debug).
         "mode": None,
         "enabled": True,
+        # Debug mode keeps a sound when any window of it scores at least this, held or not: a
+        # knock the live detector missed because it didn't stay above its threshold long enough.
+        # Not set by training, unlike the thresholds. 1.0 keeps only detections and maybes.
+        "debug_min_score": 0.5,
         # A sound event starts when the 50 ms level rises this many dB above the
         # background (the median level of the last background_window seconds)...
         "trigger_db": 15.0,
@@ -147,7 +152,7 @@ SETTINGS_FILE = "settings.yaml"
 EDITABLE = {
     "source": ["name", "url", "username", "password"],
     "mqtt": ["enabled", "host", "port", "username", "password"],
-    "collection": ["mode", "enabled", "min_dbfs", "trigger_db", "max_clips_per_hour", "max_disk_mb"],
+    "collection": ["mode", "enabled", "debug_min_score", "min_dbfs", "trigger_db", "max_clips_per_hour", "max_disk_mb"],
     "detection": ["targets", "off_delay", "min_hits", "thresholds"],
     "training": ["false_alarms_per_week", "maybe_per_week"],
     "web": ["password"],
@@ -275,6 +280,8 @@ def save_settings(cfg: dict, changes: dict) -> dict:
             value = _coerce(DEFAULTS[section][key], value)
             if (section, key) == ("collection", "mode") and value not in COLLECTION_MODES:
                 raise ValueError(f"collection.mode: one of {', '.join(COLLECTION_MODES)}")
+            if (section, key) == ("collection", "debug_min_score") and not 0 <= value <= 1:
+                raise ValueError("collection.debug_min_score: between 0 and 1")
             current.setdefault(section, {})[key] = value
     if current.get("source", {}).get("name") is not None and not LABEL_RE.match(current["source"]["name"]):
         raise ValueError("source.name: lowercase letters, digits and _ only")
